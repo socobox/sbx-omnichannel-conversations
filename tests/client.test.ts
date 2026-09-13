@@ -11,6 +11,15 @@ let chats = new Map<string, RestChat>();
 let sockets: Array<{ send: (data: string) => void; close: () => void }> = [];
 let sentMessages: Array<{ chat_id: number; body: string }> = [];
 
+// Builds a structurally-valid (unsigned) JWT so Client's own base64 payload decode — the same
+// trick @twilio/conversations uses for exp — can read a fake `agent_id`/`exp` claim in tests.
+function fakeJwt(payload: Record<string, unknown>): string {
+  const b64url = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+  return `${b64url({ alg: "none" })}.${b64url(payload)}.sig`;
+}
+
+let mediaUploads: Array<{ chat_id: number; participant_id: string; filename: string }> = [];
+
 function baseChat(overrides: Partial<RestChat> = {}): RestChat {
   return {
     id: 1,
@@ -39,10 +48,11 @@ beforeEach(() => {
   chats = new Map([["1", baseChat()]]);
   sockets = [];
   sentMessages = [];
+  mediaUploads = [];
 
   server = Bun.serve({
     port: 0,
-    fetch(req, srv) {
+    async fetch(req, srv) {
       const url = new URL(req.url);
       if (url.pathname === "/ws/chat") {
         if (srv.upgrade(req)) return undefined;
@@ -56,6 +66,23 @@ beforeEach(() => {
       }
       const mediaMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages\/(\d+)\/media_url$/);
       if (mediaMatch) return Response.json({ url: `https://cdn.example.com/${mediaMatch[2]}` });
+
+      const updateMessageMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages\/(\d+)$/);
+      if (updateMessageMatch && req.method === "PUT") return Response.json({ success: true });
+
+      const sendMediaMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages$/);
+      if (sendMediaMatch && req.method === "POST") {
+        const form = await req.formData();
+        const file = form.get("file") as File;
+        const participantId = String(form.get("participant_id"));
+        mediaUploads.push({ chat_id: Number(sendMediaMatch[1]), participant_id: participantId, filename: file.name });
+        const created: RestChatMessage = {
+          id: 900, sid: "IM900", body: (form.get("body") as string) || "", media: "sbx-key-900", media_type: file.type,
+          metadata: {}, reactions: [], response_time: null, chat_id: Number(sendMediaMatch[1]), participant_id: Number(participantId),
+          created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+        };
+        return Response.json(created);
+      }
       return new Response("not found", { status: 404 });
     },
     websocket: {
@@ -196,14 +223,81 @@ describe("Client", () => {
     client.shutdown();
   });
 
-  it("rejects sendMessage with media (outbound attachments have no backend endpoint in v1)", async () => {
-    const client = new Client("agent-token");
+  it("rejects sendMessage with media when this agent has no participant record in this chat", async () => {
+    const client = new Client("agent-token"); // not a real JWT — decodes to no agent_id at all
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
     await expect(
       conversation.sendMessage({ contentType: "image/png", media: new Blob(["x"]) }),
-    ).rejects.toThrow(/isn't wired/);
+    ).rejects.toThrow(/no participant record/);
+
+    client.shutdown();
+  });
+
+  it("sendMessage with media uploads via POST .../messages and resolves with the created message's id", async () => {
+    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 })); // matches participant id=11 in baseChat
+    await waitFor(client, "conversationJoined");
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
+
+    const blob = new Blob(["fake bytes"], { type: "image/png" });
+    const index = await conversation.sendMessage({ contentType: "image/png", media: blob, filename: "photo.png" });
+
+    expect(index).toBe(900);
+    expect(mediaUploads).toEqual([{ chat_id: 1, participant_id: "11", filename: "photo.png" }]);
+
+    client.shutdown();
+  });
+
+  it("Message#updateBody persists the edit and resolves once the message.updated echo arrives", async () => {
+    const client = new Client("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    const page = await conversation.getMessages();
+    const message = page.items[0]!;
+    expect(message.body).toBe("hello");
+
+    const updatePromise = message.updateBody("edited");
+    await new Promise((r) => setTimeout(r, 10));
+    broadcast({
+      type: "message.updated",
+      chat_message: {
+        id: 100, sid: "IM100", body: "edited", media: null, media_type: null,
+        metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+        created_at: new Date(0).toISOString(), updated_at: new Date().toISOString(),
+      },
+    });
+    const updated = await updatePromise;
+    expect(updated.body).toBe("edited");
+
+    client.shutdown();
+  });
+
+  it("messageUpdated reports updateReasons: ['body'] for a body-only edit vs ['attributes'] for metadata/reactions", async () => {
+    const client = new Client("agent-token");
+    await waitFor(client, "conversationJoined");
+
+    const bodyEditPromise = waitFor<any>(client, "messageUpdated");
+    broadcast({
+      type: "message.updated",
+      chat_message: {
+        id: 100, sid: "IM100", body: "edited body", media: null, media_type: null,
+        metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+        created_at: new Date(0).toISOString(), updated_at: new Date().toISOString(),
+      },
+    });
+    expect((await bodyEditPromise).updateReasons).toEqual(["body"]);
+
+    const reactionPromise = waitFor<any>(client, "messageUpdated");
+    broadcast({
+      type: "message.updated",
+      chat_message: {
+        id: 100, sid: "IM100", body: "edited body", media: null, media_type: null,
+        metadata: {}, reactions: [{ author: "agent_99", value: "👍", updated_at: new Date().toISOString() }],
+        response_time: null, chat_id: 1, participant_id: 10,
+        created_at: new Date(0).toISOString(), updated_at: new Date().toISOString(),
+      },
+    });
+    expect((await reactionPromise).updateReasons).toEqual(["attributes"]);
 
     client.shutdown();
   });

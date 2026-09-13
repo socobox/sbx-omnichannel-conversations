@@ -1,6 +1,6 @@
 import type { Conversation } from "./Conversation.js";
 import { Media } from "./Media.js";
-import type { RestChatMessage } from "./internal/restApi.js";
+import { RestApi, type RestChatMessage } from "./internal/restApi.js";
 
 export interface MessageReaction {
   author: string;
@@ -42,5 +42,23 @@ export class Message {
     this.attachedMedia = raw.media
       ? [new Media({ chatId: raw.chat_id, messageId: raw.id, contentType: raw.media_type ?? "application/octet-stream" })]
       : null;
+  }
+
+  /**
+   * Persisted body edit — a genuinely new capability with no Rails precedent (see the README):
+   * Twilio's own updateBody() was never durable, only ever live in Twilio's hosted conversation.
+   * Only works for `client === 'web'` chats; the backend rejects (422) anything else, surfacing
+   * here as a rejected Promise, same as any other REST failure.
+   */
+  async updateBody(body: string): Promise<Message> {
+    await RestApi.updateMessage(this.conversation.chatId, this.index, { body });
+    return this.conversation.awaitMessageUpdate(this.index);
+  }
+
+  /** Matches Twilio's own updateAttributes — a wholesale merge server-side (see
+   * web_chat.repo.ts#updateMessage's own comment: MERGES into existing metadata, not a replace). */
+  async updateAttributes(attributes: Record<string, unknown>): Promise<Message> {
+    await RestApi.updateMessage(this.conversation.chatId, this.index, { metadata: attributes });
+    return this.conversation.awaitMessageUpdate(this.index);
   }
 }

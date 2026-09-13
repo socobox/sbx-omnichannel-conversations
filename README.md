@@ -54,7 +54,7 @@ This package implements the subset of `@twilio/conversations` actually used by
   `getMessages(pageSize)`, `getUnreadMessagesCount()`, `setAllMessagesRead()`,
   `sendMessage(body, attributes)`, `getParticipants()`
 - `Message` — `sid`, `index`, `body`, `author`, `attributes`, `dateCreated`, `dateUpdated`,
-  `conversation`, `attachedMedia`
+  `conversation`, `attachedMedia`, `updateBody(body)`, `updateAttributes(attributes)`
 - `Participant` — `sid`, `identity`, `attributes`, `type`
 - `Media` — `contentType`, `filename`, `getContentTemporaryUrl()`
 - `Paginator<T>` — `items`, `hasNextPage`, `hasPrevPage`, `nextPage()`, `prevPage()`
@@ -64,10 +64,22 @@ This package implements the subset of `@twilio/conversations` actually used by
 These are real gaps versus the Twilio-backed frontend today, not oversights — each is a
 deliberate scope decision, documented here so a caller doesn't discover them by surprise:
 
-- **No outbound media/file sending.** zavu's backend has no endpoint for an agent to send a file
-  attachment; `conversation.sendMessage({ contentType, media })` rejects with a clear error.
-  Plain-text `sendMessage(body)` works today. Inbound media (received from the customer) works
-  fully, including `message.attachedMedia[0].getContentTemporaryUrl()`.
+- **Outbound media/file sending works, but only for `client === 'web'` chats**, and only the
+  attachment itself — `conversation.sendMessage({contentType, media, filename})` proxies the blob
+  straight to zavu's own `POST /web_chats/:id/messages`, which uploads it to SBX and creates the
+  message in one round trip. `attributes` passed alongside a media send are **not persisted yet**
+  (the shared message-insert path zavu's backend uses everywhere doesn't accept custom metadata at
+  creation time) — a narrow, deliberate v1 gap, not a silent drop: the media itself, filename, and
+  content type all work. Requires this agent to already have a participant record in the chat
+  (`sendMessage` rejects with a clear "no participant record for this agent in this chat" error
+  otherwise — resolved automatically from the `agent_id` claim in the token passed to
+  `new Client(token)`, no new parameters needed at any call site).
+- **Message body editing works, but only for `client === 'web'` chats.** `message.updateBody(text)`
+  persists the edit server-side and resolves once the `message.updated` broadcast round-trips back
+  (there's no synchronous ack). For any other channel (whatsapp/sms/email/instagram) the backend
+  rejects with a 422 — that channel's message has already gone out through an external provider
+  and can't be retroactively edited there. `message.updateAttributes(attrs)` always works (a
+  wholesale merge into the message's metadata), regardless of channel.
 - **No persistent read-tracking.** `lastReadMessageIndex` / `getUnreadMessagesCount()` are
   in-memory only for the lifetime of the `Conversation` object — there's no backend column to
   persist "this agent has read up to message N" across reconnects. `getUnreadMessagesCount()`
@@ -81,23 +93,6 @@ deliberate scope decision, documented here so a caller doesn't discover them by 
   a reaction is NOT part of this package's API (it wasn't part of the real `@twilio/conversations`
   API either). The frontend's own existing reaction REST call is unaffected by this migration.
 - **Web only.** No React Native / mobile transport has been built or validated yet.
-
-## Real gaps found auditing `sbx-omnichannel-ui` (not yet resolved)
-
-Two of `sbx-omnichannel-ui`'s ACTUAL call sites depend on capabilities zavu's backend does not
-have at all today — these are backend-scope decisions, not something this library alone can paper
-over:
-
-- **`ChatInputWrapperComponent.tsx`'s `sendAudio()`/`handleSendAllFiles()`** call
-  `conversation.sendMessage({contentType, media, filename}, attributes)` for real, in production
-  (voice notes and file uploads), not just as an unused code path. This library currently rejects
-  that call — see "No outbound media/file sending" above. Needs a real zavu upload endpoint before
-  this feature works again.
-- **`ChatInputWrapperComponent.tsx`'s message-edit flow** calls `editMessage.updateBody(nextBody)`
-  and `editMessage.updateAttributes(...)` on an existing `Message` — methods this library's
-  `Message` class doesn't have at all yet. zavu's `PUT /web_chats/:id/messages/:id` only accepts
-  `metadata`, never `body` (`UpdateWebChatMessageBody` zod schema, `web_chat.repo.ts`). Needs a new
-  body-update code path server-side plus `Message.updateBody()`/`updateAttributes()` client-side.
 
 ## Development
 

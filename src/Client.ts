@@ -18,14 +18,16 @@ interface ClientEvents {
   messageUpdated: [{ message: Message; updateReasons: MessageUpdateReason[] }];
 }
 
-/** Decodes a JWT's `exp` claim (seconds since epoch) without pulling in a JWT library — the same
- * trick @twilio/conversations itself uses internally to drive tokenAboutToExpire/tokenExpired. */
-function decodeJwtExpiry(token: string): number | null {
+/** Decodes a JWT's payload without pulling in a JWT library — the same trick
+ * @twilio/conversations itself uses internally to drive tokenAboutToExpire/tokenExpired. zavu's
+ * own agent WS token payload (see chatToken.service.ts's AgentTokenPayload) is plain, readable
+ * JSON once base64-decoded — no need to verify the signature client-side, this is just reading
+ * claims already trusted (the token came from our own backend). */
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   try {
-    const payload = JSON.parse(atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/")));
-    return typeof payload.exp === "number" ? payload.exp * 1000 : null;
+    return JSON.parse(atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/")));
   } catch {
     return null;
   }
@@ -41,11 +43,22 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private transport: WsTransport;
   private conversationsByChatId = new Map<number, Conversation>();
   private expiryTimers: ReturnType<typeof setTimeout>[] = [];
+  // Twilio's Client derives "who am I" from the grants baked into its own access token; this is
+  // the equivalent for zavu's agent token (see chatToken.service.ts's AgentTokenPayload) — needed
+  // so Conversation can resolve which participant row is "this agent" for the media-send path,
+  // with zero new parameters at any frontend call site.
+  private agentId: number | null = null;
 
   constructor(token: string) {
     super();
+    this.agentId = this.decodeAgentId(token);
     this.transport = this.buildTransport(token);
     this.scheduleExpiryTimers(token);
+  }
+
+  private decodeAgentId(token: string): number | null {
+    const payload = decodeJwtPayload(token);
+    return typeof payload?.agent_id === "number" ? payload.agent_id : null;
   }
 
   private buildTransport(token: string): WsTransport {
@@ -71,7 +84,8 @@ export class Client extends TypedEventEmitter<ClientEvents> {
 
   private scheduleExpiryTimers(token: string): void {
     this.clearExpiryTimers();
-    const expiresAt = decodeJwtExpiry(token);
+    const payload = decodeJwtPayload(token);
+    const expiresAt = typeof payload?.exp === "number" ? payload.exp * 1000 : null;
     if (expiresAt == null) return;
     const now = Date.now();
     const aboutToExpireDelay = expiresAt - TOKEN_ABOUT_TO_EXPIRE_MS - now;
@@ -89,7 +103,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private async joinConversation(chatId: number): Promise<void> {
     if (this.conversationsByChatId.has(chatId)) return;
     const chat = await RestApi.getChat(chatId);
-    const conversation = new Conversation(chat, this.transport);
+    const conversation = new Conversation(chat, this.transport, this.agentId);
     conversation.on("updated", (payload) => this.emit("conversationUpdated", payload));
     this.conversationsByChatId.set(chatId, conversation);
     this.emit("conversationJoined", conversation);
@@ -106,12 +120,12 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private applyMessage(raw: RestChatMessage, reason: "added" | "updated"): void {
     const conversation = this.conversationsByChatId.get(raw.chat_id);
     if (!conversation) return; // a message for a chat we haven't joined yet — ignored, matches Twilio's own behavior
-    const message = conversation.applyRealtimeMessage(raw, reason);
-    if (reason === "added") this.emit("messageAdded", message);
-    // Both real triggers for message.updated today (metadata edits, add_reaction) change what
-    // surfaces under message.attributes — there's no body-edit or delivery-receipt backend path
-    // yet (see the README's known limitations), so "attributes" is the only reason that can fire.
-    else this.emit("messageUpdated", { message, updateReasons: ["attributes"] });
+    if (reason === "added") {
+      this.emit("messageAdded", conversation.applyRealtimeMessage(raw, reason).message);
+    } else {
+      const { message, updateReasons } = conversation.applyRealtimeMessage(raw, reason);
+      this.emit("messageUpdated", { message, updateReasons });
+    }
   }
 
   /**
@@ -135,13 +149,14 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       if (conversation.sid === sid) return conversation;
     }
     const chat = await RestApi.getChat(sid);
-    const conversation = new Conversation(chat, this.transport);
+    const conversation = new Conversation(chat, this.transport, this.agentId);
     conversation.on("updated", (payload) => this.emit("conversationUpdated", payload));
     this.conversationsByChatId.set(chat.id, conversation);
     return conversation;
   }
 
   async updateToken(token: string): Promise<void> {
+    this.agentId = this.decodeAgentId(token);
     this.transport.updateToken(token);
     this.scheduleExpiryTimers(token);
   }
