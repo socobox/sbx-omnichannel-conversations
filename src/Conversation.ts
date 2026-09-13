@@ -220,7 +220,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     if (participantId == null) {
       throw new Error("sbx-omnichannel-conversations: no participant record for this agent in this chat — cannot send media");
     }
-    const created = await RestApi.sendMedia(this.chatId, participantId, body.media, body.filename, undefined);
+    const created = await RestApi.sendMedia(this.chatId, participantId, body.media, body.filename, body.contentType, undefined);
     return created.id;
   }
 }

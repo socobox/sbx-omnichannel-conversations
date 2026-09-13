@@ -26,7 +26,7 @@ export interface JSONObject {
 export type JSONArray = JSONValue[];
 
 export interface SendMediaOptions {
-  contentType: string;
+  contentType: string | null;
   media: Blob;
   filename?: string;
 }

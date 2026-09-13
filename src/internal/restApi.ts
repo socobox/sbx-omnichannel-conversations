@@ -127,10 +127,15 @@ export function sendMedia(
   participantId: number,
   file: Blob,
   filename: string | undefined,
+  contentType: string | null | undefined,
   body: string | undefined,
 ): Promise<RestChatMessage> {
+  // The caller's explicit contentType is authoritative (matches real Twilio's own contract),
+  // not just whatever the Blob's own .type happens to be — a FormData part's Content-Type can
+  // only be set by constructing a fresh Blob with the desired type.
+  const filePart = contentType && contentType !== file.type ? new Blob([file], { type: contentType }) : file;
   const form = new FormData();
-  form.append("file", file, filename ?? "attachment");
+  form.append("file", filePart, filename ?? "attachment");
   form.append("participant_id", String(participantId));
   if (body) form.append("body", body);
   return requestForm<RestChatMessage>(`/web_chats/${chatId}/messages`, form);
