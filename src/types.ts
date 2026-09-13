@@ -13,6 +13,8 @@ export type ConversationUpdateReason =
   | "state"
   | "status";
 
+export type MessageUpdateReason = "body" | "attributes" | "dateUpdated" | "deliveryReceipt";
+
 export interface SendMediaOptions {
   contentType: string;
   media: Blob;

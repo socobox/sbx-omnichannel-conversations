@@ -46,8 +46,9 @@ This package implements the subset of `@twilio/conversations` actually used by
 - `configure({ apiBaseUrl, apiKey })`
 - `Client` — `new Client(token)`, events `connectionStateChanged` / `tokenAboutToExpire` /
   `tokenExpired` / `conversationJoined` / `conversationLeft` / `conversationRemoved` /
-  `conversationUpdated` / `messageAdded` / `messageUpdated`, methods
-  `getSubscribedConversations()` / `getConversationBySid(sid)` / `updateToken(token)` /
+  `conversationUpdated` / `messageAdded` / `messageUpdated({message, updateReasons})`, methods
+  `getSubscribedConversations()` → `Promise<Paginator<Conversation>>` /
+  `getConversationBySid(sid)` → `Promise<Conversation>` / `updateToken(token)` → `Promise<void>` /
   `removeAllListeners()` / `shutdown()`
 - `Conversation` — `sid`, `attributes`, `status`, `lastMessage`, `lastReadMessageIndex`,
   `getMessages(pageSize)`, `getUnreadMessagesCount()`, `setAllMessagesRead()`,
@@ -80,6 +81,23 @@ deliberate scope decision, documented here so a caller doesn't discover them by 
   a reaction is NOT part of this package's API (it wasn't part of the real `@twilio/conversations`
   API either). The frontend's own existing reaction REST call is unaffected by this migration.
 - **Web only.** No React Native / mobile transport has been built or validated yet.
+
+## Real gaps found auditing `sbx-omnichannel-ui` (not yet resolved)
+
+Two of `sbx-omnichannel-ui`'s ACTUAL call sites depend on capabilities zavu's backend does not
+have at all today — these are backend-scope decisions, not something this library alone can paper
+over:
+
+- **`ChatInputWrapperComponent.tsx`'s `sendAudio()`/`handleSendAllFiles()`** call
+  `conversation.sendMessage({contentType, media, filename}, attributes)` for real, in production
+  (voice notes and file uploads), not just as an unused code path. This library currently rejects
+  that call — see "No outbound media/file sending" above. Needs a real zavu upload endpoint before
+  this feature works again.
+- **`ChatInputWrapperComponent.tsx`'s message-edit flow** calls `editMessage.updateBody(nextBody)`
+  and `editMessage.updateAttributes(...)` on an existing `Message` — methods this library's
+  `Message` class doesn't have at all yet. zavu's `PUT /web_chats/:id/messages/:id` only accepts
+  `metadata`, never `body` (`UpdateWebChatMessageBody` zod schema, `web_chat.repo.ts`). Needs a new
+  body-update code path server-side plus `Message.updateBody()`/`updateAttributes()` client-side.
 
 ## Development
 

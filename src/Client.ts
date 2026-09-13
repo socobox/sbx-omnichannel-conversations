@@ -1,9 +1,10 @@
 import { TypedEventEmitter } from "./EventEmitter.js";
 import { Conversation } from "./Conversation.js";
 import { Message } from "./Message.js";
+import { Paginator } from "./Paginator.js";
 import { RestApi, type RestChatMessage } from "./internal/restApi.js";
 import { WsTransport } from "./internal/wsTransport.js";
-import type { ConnectionState, ConversationUpdateReason } from "./types.js";
+import type { ConnectionState, ConversationUpdateReason, MessageUpdateReason } from "./types.js";
 
 interface ClientEvents {
   connectionStateChanged: [ConnectionState];
@@ -14,7 +15,7 @@ interface ClientEvents {
   conversationRemoved: [Conversation];
   conversationUpdated: [{ conversation: Conversation; updateReasons: ConversationUpdateReason[] }];
   messageAdded: [Message];
-  messageUpdated: [{ message: Message }];
+  messageUpdated: [{ message: Message; updateReasons: MessageUpdateReason[] }];
 }
 
 /** Decodes a JWT's `exp` claim (seconds since epoch) without pulling in a JWT library — the same
@@ -107,11 +108,21 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     if (!conversation) return; // a message for a chat we haven't joined yet — ignored, matches Twilio's own behavior
     const message = conversation.applyRealtimeMessage(raw, reason);
     if (reason === "added") this.emit("messageAdded", message);
-    else this.emit("messageUpdated", { message });
+    // Both real triggers for message.updated today (metadata edits, add_reaction) change what
+    // surfaces under message.attributes — there's no body-edit or delivery-receipt backend path
+    // yet (see the README's known limitations), so "attributes" is the only reason that can fire.
+    else this.emit("messageUpdated", { message, updateReasons: ["attributes"] });
   }
 
-  getSubscribedConversations(): Conversation[] {
-    return [...this.conversationsByChatId.values()];
+  /**
+   * Matches Twilio's own async, Paginator-shaped getSubscribedConversations() — the reference
+   * frontend does `(await client.getSubscribedConversations()).items`. There's no real
+   * server-side pagination over an agent's subscribed chats (the full set arrives in one
+   * `connected` WS message), so this is a single-page Paginator wrapping the current cache.
+   */
+  async getSubscribedConversations(): Promise<Paginator<Conversation>> {
+    const all = [...this.conversationsByChatId.values()];
+    return new Paginator(all, 0, all.length || 1);
   }
 
   /**
@@ -130,7 +141,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     return conversation;
   }
 
-  updateToken(token: string): void {
+  async updateToken(token: string): Promise<void> {
     this.transport.updateToken(token);
     this.scheduleExpiryTimers(token);
   }

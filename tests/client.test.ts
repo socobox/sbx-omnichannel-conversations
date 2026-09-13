@@ -95,8 +95,8 @@ describe("Client", () => {
 
     expect(conversation.sid).toBe("CH1");
     expect(conversation.attributes).toEqual({ phone: "+15551234567" });
-    expect(client.getSubscribedConversations()).toHaveLength(1);
-    expect(client.getConversationBySid("CH1")).toBeDefined();
+    expect((await client.getSubscribedConversations()).items).toHaveLength(1);
+    expect(await client.getConversationBySid("CH1")).toBeDefined();
 
     client.shutdown();
   });
@@ -118,7 +118,7 @@ describe("Client", () => {
     expect(message.author).toBe("customer_1");
     expect(message.index).toBe(101);
 
-    const conversation = client.getSubscribedConversations()[0]!;
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
     expect(conversation.lastMessage?.index).toBe(101);
 
     client.shutdown();
@@ -136,9 +136,10 @@ describe("Client", () => {
     };
     const updatedPromise = waitFor<any>(client, "messageUpdated");
     broadcast({ type: "message.updated", chat_message: updated });
-    const { message } = await updatedPromise;
+    const { message, updateReasons } = await updatedPromise;
 
     expect(message.attributes.reactions).toEqual([{ author: "agent_99", value: "👍", updated_at: updated.updated_at }]);
+    expect(updateReasons).toEqual(["attributes"]);
 
     client.shutdown();
   });
@@ -152,7 +153,7 @@ describe("Client", () => {
     const removed = await removedPromise;
 
     expect(removed.sid).toBe("CH1");
-    expect(client.getSubscribedConversations()).toHaveLength(0);
+    expect((await client.getSubscribedConversations()).items).toHaveLength(0);
 
     client.shutdown();
   });
@@ -168,7 +169,7 @@ describe("Client", () => {
     const conversation = await joinedPromise;
 
     expect(conversation.sid).toBe("CH2");
-    expect(client.getSubscribedConversations()).toHaveLength(2);
+    expect((await client.getSubscribedConversations()).items).toHaveLength(2);
 
     client.shutdown();
   });
@@ -176,7 +177,7 @@ describe("Client", () => {
   it("sendMessage resolves with the real message id once the message.new echo arrives", async () => {
     const client = new Client("agent-token");
     await waitFor(client, "conversationJoined");
-    const conversation = client.getSubscribedConversations()[0]!;
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
 
     const sendPromise = conversation.sendMessage("hi there");
     // The mock server doesn't echo automatically — simulate the real backend's own round trip.
@@ -198,7 +199,7 @@ describe("Client", () => {
   it("rejects sendMessage with media (outbound attachments have no backend endpoint in v1)", async () => {
     const client = new Client("agent-token");
     await waitFor(client, "conversationJoined");
-    const conversation = client.getSubscribedConversations()[0]!;
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
 
     await expect(
       conversation.sendMessage({ contentType: "image/png", media: new Blob(["x"]) }),
