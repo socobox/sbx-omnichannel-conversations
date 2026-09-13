@@ -1,0 +1,40 @@
+{
+  "name": "sbx-omnichannel-conversations",
+  "version": "0.1.0",
+  "description": "Drop-in replacement for @twilio/conversations backed by SBX Omnichannel's own WebSocket/REST API — same classes, events, and data shapes, zero Twilio dependency.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib/**/*"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "bun test tests/"
+  },
+  "keywords": [
+    "twilio",
+    "conversations",
+    "chat",
+    "websocket",
+    "sbx"
+  ],
+  "author": "SOCOBOX",
+  "license": "ISC",
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "bun-types": "^1.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/socobox/sbx-omnichannel-conversations.git"
+  },
+  "bugs": {
+    "url": "https://github.com/socobox/sbx-omnichannel-conversations/issues"
+  },
+  "homepage": "https://github.com/socobox/sbx-omnichannel-conversations#readme"
+}
