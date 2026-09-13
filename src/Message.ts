@@ -9,6 +9,8 @@ export interface MessageReaction {
   updated_at: string;
 }
 
+export type MessageType = "text" | "media";
+
 // Mirrors @twilio/conversations' own `Message`. `index` has no direct zavu equivalent (Twilio's
 // own index is a per-conversation sequence starting at 0); the message's own database id is used
 // instead — still a strictly-increasing number, which is all any real caller in the reference
@@ -23,6 +25,9 @@ export class Message {
   readonly dateUpdated: Date;
   readonly conversation: Conversation;
   readonly attachedMedia: Media[] | null;
+  readonly type: MessageType;
+  /** @deprecated Use attachedMedia instead — matches Twilio's own deprecated single-media getter. */
+  readonly media: Media | null;
 
   /** @internal */
   constructor(raw: RestChatMessage, conversation: Conversation) {
@@ -43,6 +48,8 @@ export class Message {
     this.attachedMedia = raw.media
       ? [new Media({ chatId: raw.chat_id, messageId: raw.id, contentType: raw.media_type ?? "application/octet-stream" })]
       : null;
+    this.type = this.attachedMedia?.length ? "media" : "text";
+    this.media = this.attachedMedia?.[0] ?? null;
   }
 
   /**

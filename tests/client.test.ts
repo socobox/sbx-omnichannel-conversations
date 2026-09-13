@@ -345,4 +345,114 @@ describe("Client", () => {
 
     client.shutdown();
   });
+
+  it("Message#type/media reflect whether the message has an attachment, matching Twilio's deprecated single-media getter", async () => {
+    chats.set("1", baseChat({
+      chat_messages: [
+        { id: 300, sid: "IM300", body: "hi", media: null, media_type: null, metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
+        { id: 301, sid: "IM301", body: null, media: "key.png", media_type: "image/png", metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
+      ],
+    }));
+    const client = new Client("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    const page = await conversation.getMessages();
+
+    expect(page.items[0].type).toBe("text");
+    expect(page.items[0].media).toBeNull();
+    expect(page.items[1].type).toBe("media");
+    expect(page.items[1].media).not.toBeNull();
+
+    client.shutdown();
+  });
+
+  it("Conversation exposes dateCreated/dateUpdated and setAllMessagesUnread's resulting count", async () => {
+    const client = new Client("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+
+    expect(conversation.dateCreated).toBeInstanceOf(Date);
+    expect(conversation.dateUpdated).toBeInstanceOf(Date);
+
+    const unreadCount = await conversation.setAllMessagesUnread();
+    expect(unreadCount).toBe(conversation.lastMessage.index + 1);
+    expect(conversation.lastReadMessageIndex).toBe(-1);
+
+    client.shutdown();
+  });
+
+  it("Conversation itself emits messageAdded/messageUpdated, mirroring Client's aggregated feed", async () => {
+    const client = new Client("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+
+    const addedPromise = waitFor<any>(conversation, "messageAdded");
+    broadcast({
+      type: "message.new",
+      chat_message: {
+        id: 400, sid: "IM400", body: "hi again", media: null, media_type: null,
+        metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      },
+    });
+    expect((await addedPromise).body).toBe("hi again");
+
+    const updatedPromise = waitFor<any>(conversation, "messageUpdated");
+    broadcast({
+      type: "message.updated",
+      chat_message: {
+        id: 400, sid: "IM400", body: "edited", media: null, media_type: null,
+        metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      },
+    });
+    const { message, updateReasons } = await updatedPromise;
+    expect(message.body).toBe("edited");
+    expect(updateReasons).toEqual(["body"]);
+
+    client.shutdown();
+  });
+
+  it("prepareMessage()/MessageBuilder sends a single-attachment message via the same media upload path", async () => {
+    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 }));
+    await waitFor(client, "conversationJoined");
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
+
+    const index = await conversation.prepareMessage()
+      .setBody("ignored for a media send")
+      .addMedia({ contentType: "image/png", media: new Blob(["x"]), filename: "a.png" })
+      .build()
+      .send();
+
+    expect(index).toBe(900);
+    expect(mediaUploads).toEqual([{ chat_id: 1, participant_id: "11", filename: "a.png" }]);
+
+    client.shutdown();
+  });
+
+  it("MessageBuilder rejects more than one attachment per message, clearly", async () => {
+    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 }));
+    await waitFor(client, "conversationJoined");
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
+
+    const builder = conversation.prepareMessage()
+      .addMedia({ contentType: "image/png", media: new Blob(["x"]) })
+      .addMedia({ contentType: "image/png", media: new Blob(["y"]) });
+
+    await expect(builder.build().send()).rejects.toThrow(/more than one attachment/);
+
+    client.shutdown();
+  });
+
+  it("Participant exposes bindings as a best-effort JSONValue (channel-specific shape, not strictly typed)", async () => {
+    chats.set("1", baseChat({
+      participants: [
+        { id: 20, agent_id: null, indentify: "+15550001111", name: "Ada", sid: null, conversation_sid: null, chat_id: 1, participant_type: "USER", metadata: { whatsapp: { address: "+15550001111" } }, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
+      ],
+    }));
+    const client = new Client("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    const participants = await conversation.getParticipants();
+
+    expect((participants[0].bindings as any).whatsapp.address).toBe("+15550001111");
+
+    client.shutdown();
+  });
 });

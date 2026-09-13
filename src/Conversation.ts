@@ -1,5 +1,6 @@
 import { TypedEventEmitter } from "./EventEmitter.js";
 import { Message } from "./Message.js";
+import { MessageBuilder } from "./MessageBuilder.js";
 import { Participant } from "./Participant.js";
 import { Paginator } from "./Paginator.js";
 import { RestApi, type RestChat, type RestChatMessage, type RestParticipant } from "./internal/restApi.js";
@@ -8,6 +9,11 @@ import type { WsTransport } from "./internal/wsTransport.js";
 
 interface ConversationEvents {
   updated: [{ conversation: Conversation; updateReasons: ConversationUpdateReason[] }];
+  // Mirrors Twilio's own per-conversation messageAdded/messageUpdated — real, actively-used call
+  // sites (ChatBodyMessagesComponent.tsx) listen on the CURRENTLY OPEN conversation directly,
+  // not just on Client's aggregated feed. Same payload shape as Client's own events.
+  messageAdded: [Message];
+  messageUpdated: [{ message: Message; updateReasons: MessageUpdateReason[] }];
 }
 
 // Mirrors @twilio/conversations' own `Conversation` — one chat. `sid` is zavu's own
@@ -18,6 +24,8 @@ interface ConversationEvents {
 export class Conversation extends TypedEventEmitter<ConversationEvents> {
   readonly sid: string;
   readonly friendlyName: string | null;
+  readonly dateCreated: Date;
+  readonly dateUpdated: Date;
   attributes: JSONValue;
   status: string;
   lastMessage: { index: number; dateCreated: Date } | null = null;
@@ -46,6 +54,8 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     this.chatId = raw.id;
     this.sid = raw.conversation_sid ?? String(raw.id);
     this.friendlyName = raw.name;
+    this.dateCreated = new Date(raw.created_at);
+    this.dateUpdated = new Date(raw.updated_at);
     this.attributes = (raw.metadata ?? {}) as JSONValue;
     this.status = raw.status;
     this.transport = transport;
@@ -102,6 +112,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     let messageUpdateReasons: MessageUpdateReason[] = [];
     if (reason === "added") {
       this.lastMessage = { index: message.index, dateCreated: message.dateCreated };
+      this.emit("messageAdded", message);
     } else {
       // Diffed against the PREVIOUSLY cached copy — both a body edit and an attributes/reaction
       // change arrive as the same wire event (message.updated), so this is the only way to tell
@@ -115,6 +126,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
         for (const resolve of resolvers) resolve(message);
         this.pendingMessageUpdates.delete(message.index);
       }
+      this.emit("messageUpdated", { message, updateReasons: messageUpdateReasons });
     }
     this.emit("updated", { conversation: this, updateReasons: ["lastMessage"] });
     return { message, updateReasons: messageUpdateReasons };
@@ -171,9 +183,23 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     return null;
   }
 
-  /** In-memory only — see the class-level `lastReadMessageIndex` comment. */
-  async setAllMessagesRead(): Promise<void> {
+  /** In-memory only — see the class-level `lastReadMessageIndex` comment. Matches Twilio's own
+   * return contract (resulting unread count) even though nothing is actually persisted. */
+  async setAllMessagesRead(): Promise<number> {
     if (this.lastMessage) this.lastReadMessageIndex = this.lastMessage.index;
+    return 0;
+  }
+
+  /** In-memory only — see the class-level `lastReadMessageIndex` comment. */
+  async setAllMessagesUnread(): Promise<number> {
+    this.lastReadMessageIndex = -1;
+    return this.lastMessage ? this.lastMessage.index + 1 : 0;
+  }
+
+  /** Matches Twilio's own MessageBuilder entry point — see MessageBuilder's own comment for
+   * exactly which subset of the real builder API is implemented. */
+  prepareMessage(): MessageBuilder {
+    return new MessageBuilder(this);
   }
 
   /**

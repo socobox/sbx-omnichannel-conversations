@@ -50,20 +50,35 @@ This package implements the subset of `@twilio/conversations` actually used by
   `getSubscribedConversations()` → `Promise<Paginator<Conversation>>` /
   `getConversationBySid(sid)` → `Promise<Conversation>` / `updateToken(token)` → `Promise<void>` /
   `removeAllListeners()` / `shutdown()`
-- `Conversation` — `sid`, `attributes`, `status`, `lastMessage`, `lastReadMessageIndex`,
+- `Conversation` — `sid`, `attributes`, `status`, `dateCreated`, `dateUpdated`, `lastMessage`,
+  `lastReadMessageIndex`, events `updated` / `messageAdded` / `messageUpdated({message, updateReasons})`,
   `getMessages(pageSize)`, `getUnreadMessagesCount()`, `setAllMessagesRead()`,
-  `sendMessage(body, attributes)`, `getParticipants()`
-- `Message` — `sid`, `index`, `body`, `author`, `attributes`, `dateCreated`, `dateUpdated`,
-  `conversation`, `attachedMedia`, `updateBody(body)`, `updateAttributes(attributes)`
-- `Participant` — `sid`, `identity`, `attributes`, `type`
+  `setAllMessagesUnread()`, `sendMessage(body, attributes)`, `prepareMessage()`, `getParticipants()`
+- `Message` — `sid`, `index`, `body`, `author`, `attributes`, `type`, `media` (deprecated,
+  single-attachment alias), `dateCreated`, `dateUpdated`, `conversation`, `attachedMedia`,
+  `updateBody(body)`, `updateAttributes(attributes)`
+- `MessageBuilder` — `prepareMessage()`'s return value: `setBody(text)`, `setAttributes(attrs)`,
+  `addMedia(payload)`, `build().send()` — only the subset the reference frontend actually calls
+  (single attachment; more than one throws a clear error, see below)
+- `Participant` — `sid`, `identity`, `attributes`, `type`, `bindings` (best-effort, not strictly
+  typed per channel)
 - `Media` — `contentType`, `filename`, `getContentTemporaryUrl()`
 - `Paginator<T>` — `items`, `hasNextPage`, `hasPrevPage`, `nextPage()`, `prevPage()`
+- `JSONValue` / `JSONObject` / `JSONArray` — matches `@twilio/conversations`' own types exactly,
+  since `attributes` (and related methods) are typed against these, not a plain
+  `Record<string, unknown>`
 
 ## Known limitations (v1)
 
 These are real gaps versus the Twilio-backed frontend today, not oversights — each is a
 deliberate scope decision, documented here so a caller doesn't discover them by surprise:
 
+- **`MessageBuilder`/`prepareMessage()` only supports ONE attachment per message.** A real call
+  site (an email compose UI) can attach several files to one message via repeated `addMedia()`
+  calls — zavu's upload endpoint accepts exactly one file per message today, so `build().send()`
+  throws a clear error rather than silently dropping every attachment past the first. `setSubject`,
+  `setEmailBody`, `setEmailHistory`, and Content Template SIDs (real Twilio `MessageBuilder`
+  features) aren't implemented at all — nothing in the migrated frontend calls them.
 - **Outbound media/file sending works, but only for `client === 'web'` chats**, and only the
   attachment itself — `conversation.sendMessage({contentType, media, filename})` proxies the blob
   straight to zavu's own `POST /web_chats/:id/messages`, which uploads it to SBX and creates the
