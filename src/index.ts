@@ -6,5 +6,5 @@ export { Participant } from "./Participant.js";
 export { Media } from "./Media.js";
 export { Paginator } from "./Paginator.js";
 export type { SbxConversationsConfig } from "./config.js";
-export type { ConnectionState, ConversationUpdateReason, MessageUpdateReason, SendMediaOptions, SendMessageBody } from "./types.js";
+export type { ConnectionState, ConversationUpdateReason, JSONArray, JSONObject, JSONValue, MessageUpdateReason, SendMediaOptions, SendMessageBody } from "./types.js";
 export type { MessageReaction } from "./Message.js";

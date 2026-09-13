@@ -1,6 +1,7 @@
 import type { Conversation } from "./Conversation.js";
 import { Media } from "./Media.js";
 import { RestApi, type RestChatMessage } from "./internal/restApi.js";
+import type { JSONValue } from "./types.js";
 
 export interface MessageReaction {
   author: string;
@@ -17,7 +18,7 @@ export class Message {
   readonly index: number;
   readonly body: string | null;
   readonly author: string | null;
-  readonly attributes: Record<string, unknown>;
+  readonly attributes: JSONValue;
   readonly dateCreated: Date;
   readonly dateUpdated: Date;
   readonly conversation: Conversation;
@@ -35,7 +36,7 @@ export class Message {
     // field on the raw row, surfaced at the top level of `attributes` to match what a component
     // reading `message.attributes.reactions` expects.
     const { custom_metadata, ...rest } = raw.metadata ?? {};
-    this.attributes = { ...rest, reactions: raw.reactions ?? [] };
+    this.attributes = { ...rest, reactions: raw.reactions ?? [] } as unknown as JSONValue;
     this.dateCreated = new Date(raw.created_at);
     this.dateUpdated = new Date(raw.updated_at);
     this.conversation = conversation;
@@ -57,7 +58,7 @@ export class Message {
 
   /** Matches Twilio's own updateAttributes — a wholesale merge server-side (see
    * web_chat.repo.ts#updateMessage's own comment: MERGES into existing metadata, not a replace). */
-  async updateAttributes(attributes: Record<string, unknown>): Promise<Message> {
+  async updateAttributes(attributes: JSONValue): Promise<Message> {
     await RestApi.updateMessage(this.conversation.chatId, this.index, { metadata: attributes });
     return this.conversation.awaitMessageUpdate(this.index);
   }

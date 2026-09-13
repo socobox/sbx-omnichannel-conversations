@@ -1,4 +1,5 @@
 import { getConfig } from "../config.js";
+import type { JSONValue } from "../types.js";
 
 // Thin REST wrapper around the SBX Omnichannel API — every call here already exists in the real
 // backend today (nothing new was invented on the wire format). Auth is the tenant's own api_key
@@ -100,7 +101,7 @@ export function getChat(chatId: number | string): Promise<RestChat> {
 // `body` is a genuinely new capability (see this package's README) — persisted body edits only
 // work for `client === 'web'` chats; the backend rejects (422) anything else, which surfaces here
 // as a rejected Promise.
-export function updateMessage(chatId: number, messageId: number, fields: { metadata?: Record<string, unknown>; body?: string }): Promise<{ success: true }> {
+export function updateMessage(chatId: number, messageId: number, fields: { metadata?: JSONValue; body?: string }): Promise<{ success: true }> {
   return request(`/web_chats/${chatId}/messages/${messageId}`, {
     method: "PUT",
     body: JSON.stringify(fields),

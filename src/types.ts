@@ -15,6 +15,16 @@ export type ConversationUpdateReason =
 
 export type MessageUpdateReason = "body" | "attributes" | "dateUpdated" | "deliveryReceipt";
 
+// Matches @twilio/conversations' own JSONValue exactly (its Message/Conversation `attributes`
+// getters, and every attributes-accepting method, are typed against this, not a plain
+// Record<string, unknown> — some call sites in a migrated frontend pass this type through
+// without a cast, so the shape has to line up exactly, not just be "close enough").
+export type JSONValue = null | string | number | boolean | JSONObject | JSONArray;
+export interface JSONObject {
+  [x: string]: JSONValue;
+}
+export type JSONArray = JSONValue[];
+
 export interface SendMediaOptions {
   contentType: string;
   media: Blob;

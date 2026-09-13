@@ -3,7 +3,7 @@ import { Message } from "./Message.js";
 import { Participant } from "./Participant.js";
 import { Paginator } from "./Paginator.js";
 import { RestApi, type RestChat, type RestChatMessage, type RestParticipant } from "./internal/restApi.js";
-import type { ConversationUpdateReason, MessageUpdateReason, SendMessageBody } from "./types.js";
+import type { ConversationUpdateReason, JSONValue, MessageUpdateReason, SendMessageBody } from "./types.js";
 import type { WsTransport } from "./internal/wsTransport.js";
 
 interface ConversationEvents {
@@ -18,7 +18,7 @@ interface ConversationEvents {
 export class Conversation extends TypedEventEmitter<ConversationEvents> {
   readonly sid: string;
   readonly friendlyName: string | null;
-  attributes: Record<string, unknown>;
+  attributes: JSONValue;
   status: string;
   lastMessage: { index: number; dateCreated: Date } | null = null;
   /**
@@ -46,7 +46,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     this.chatId = raw.id;
     this.sid = raw.conversation_sid ?? String(raw.id);
     this.friendlyName = raw.name;
-    this.attributes = raw.metadata ?? {};
+    this.attributes = (raw.metadata ?? {}) as JSONValue;
     this.status = raw.status;
     this.transport = transport;
     this.agentId = agentId;
@@ -132,7 +132,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   }
 
   /** @internal */
-  applyAttributesUpdate(attributes: Record<string, unknown>): void {
+  applyAttributesUpdate(attributes: JSONValue): void {
     this.attributes = attributes;
     this.emit("updated", { conversation: this, updateReasons: ["attributes"] });
   }
@@ -185,7 +185,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
    * server-side); `attributes` on a media send isn't persisted yet — a narrow, documented v1 gap
    * (recordMessage's shared insert path doesn't accept custom metadata at creation time today).
    */
-  async sendMessage(body: SendMessageBody, attributes?: Record<string, unknown>): Promise<number> {
+  async sendMessage(body: SendMessageBody, attributes?: JSONValue): Promise<number> {
     if (typeof body === "string") {
       void attributes;
       return await this.transport.sendMessage(this.chatId, body);
