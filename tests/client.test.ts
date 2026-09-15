@@ -99,7 +99,7 @@ beforeEach(() => {
     },
   });
 
-  configure({ apiBaseUrl: `http://localhost:${server.port}`, apiKey: "test-key" });
+  configure({ apiBaseUrl: `http://localhost:${server.port}` });
 });
 
 afterEach(() => {

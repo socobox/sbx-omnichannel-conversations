@@ -23,10 +23,12 @@ npm install sbx-omnichannel-conversations
 
 + // Call ONCE at app bootstrap, before constructing any Client. Twilio's own Client only ever
 + // needed a token because it always talked to Twilio's infrastructure — this one talks to your
-+ // own backend, so it needs to know where that is.
++ // own backend, so it just needs to know where that is. Never pass your tenant's api_key here —
++ // that's a broad, server-side-only secret; shipping it in configure() would bake it into the
++ // browser bundle. This package instead reuses the SAME per-session token you already pass to
++ // `new Client(token)` for every REST call it makes, authenticated the same way as the socket.
 + configure({
 +   apiBaseUrl: "https://your-omnichannel-api.example.com",
-+   apiKey: YOUR_TENANT_API_KEY, // the same Bearer key your app already sends to every other omnichannel REST call
 + });
 
   const client = new Client(token); // unchanged — `token` is now zavu's own agent WS token
@@ -43,7 +45,8 @@ SIDs, Sync, Voice/Video), it should work unmodified after the two lines above.
 This package implements the subset of `@twilio/conversations` actually used by
 `sbx-omnichannel-ui` — not the full SDK (no Sync, Voice, or Video channels).
 
-- `configure({ apiBaseUrl, apiKey })`
+- `configure({ apiBaseUrl })` — no credential of any kind; every REST call reuses the session
+  token already passed to `new Client(token)`
 - `Client` — `new Client(token)`, events `connectionStateChanged` / `tokenAboutToExpire` /
   `tokenExpired` / `conversationJoined` / `conversationLeft` / `conversationRemoved` /
   `conversationUpdated` / `messageAdded` / `messageUpdated({message, updateReasons})`, methods

@@ -102,7 +102,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
 
   private async joinConversation(chatId: number): Promise<void> {
     if (this.conversationsByChatId.has(chatId)) return;
-    const chat = await RestApi.getChat(chatId);
+    const chat = await RestApi.getChat(this.transport.currentToken, chatId);
     const conversation = new Conversation(chat, this.transport, this.agentId);
     conversation.on("updated", (payload) => this.emit("conversationUpdated", payload));
     this.conversationsByChatId.set(chatId, conversation);
@@ -148,7 +148,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     for (const conversation of this.conversationsByChatId.values()) {
       if (conversation.sid === sid) return conversation;
     }
-    const chat = await RestApi.getChat(sid);
+    const chat = await RestApi.getChat(this.transport.currentToken, sid);
     const conversation = new Conversation(chat, this.transport, this.agentId);
     conversation.on("updated", (payload) => this.emit("conversationUpdated", payload));
     this.conversationsByChatId.set(chat.id, conversation);

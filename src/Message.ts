@@ -46,7 +46,14 @@ export class Message {
     this.dateUpdated = new Date(raw.updated_at);
     this.conversation = conversation;
     this.attachedMedia = raw.media
-      ? [new Media({ chatId: raw.chat_id, messageId: raw.id, contentType: raw.media_type ?? "application/octet-stream" })]
+      ? [
+          new Media({
+            chatId: raw.chat_id,
+            messageId: raw.id,
+            contentType: raw.media_type ?? "application/octet-stream",
+            getToken: () => conversation.currentToken,
+          }),
+        ]
       : null;
     this.type = this.attachedMedia?.length ? "media" : "text";
     this.media = this.attachedMedia?.[0] ?? null;
@@ -59,14 +66,14 @@ export class Message {
    * here as a rejected Promise, same as any other REST failure.
    */
   async updateBody(body: string): Promise<Message> {
-    await RestApi.updateMessage(this.conversation.chatId, this.index, { body });
+    await RestApi.updateMessage(this.conversation.currentToken, this.conversation.chatId, this.index, { body });
     return this.conversation.awaitMessageUpdate(this.index);
   }
 
   /** Matches Twilio's own updateAttributes — a wholesale merge server-side (see
    * web_chat.repo.ts#updateMessage's own comment: MERGES into existing metadata, not a replace). */
   async updateAttributes(attributes: JSONValue): Promise<Message> {
-    await RestApi.updateMessage(this.conversation.chatId, this.index, { metadata: attributes });
+    await RestApi.updateMessage(this.conversation.currentToken, this.conversation.chatId, this.index, { metadata: attributes });
     return this.conversation.awaitMessageUpdate(this.index);
   }
 }

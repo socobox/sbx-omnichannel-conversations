@@ -1,6 +1,6 @@
 {
   "name": "sbx-omnichannel-conversations",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Drop-in replacement for @twilio/conversations backed by SBX Omnichannel's own WebSocket/REST API — same classes, events, and data shapes, zero Twilio dependency.",
   "type": "module",
   "main": "lib/index.js",

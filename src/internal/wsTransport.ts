@@ -124,6 +124,11 @@ export class WsTransport extends TypedEventEmitter<WsTransportEvents> {
     }, delay);
   }
 
+  /** The token currently authenticating this connection — reused for REST calls too (see restApi.ts). */
+  get currentToken(): string {
+    return this.token;
+  }
+
   /** Matches Client#updateToken — swaps credentials and reconnects with the new one. */
   updateToken(token: string): void {
     this.token = token;

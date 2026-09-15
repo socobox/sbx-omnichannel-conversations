@@ -71,6 +71,13 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     return participantId == null ? undefined : this.participantIdentities.get(participantId);
   }
 
+  /** @internal — the same per-session token authenticating this conversation's WS connection,
+   * reused for its REST calls (see internal/restApi.ts). Read lazily, never captured, since it
+   * can rotate underneath this Conversation via Client#updateToken. */
+  get currentToken(): string {
+    return this.transport.currentToken;
+  }
+
   private ingestParticipants(participants: RestParticipant[]): void {
     for (const p of participants) {
       if (p.id == null) continue;
@@ -151,7 +158,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
 
   private async ensureMessagesLoaded(): Promise<Message[]> {
     if (this.cachedMessages) return this.cachedMessages;
-    const chat = await RestApi.getChat(this.chatId);
+    const chat = await RestApi.getChat(this.currentToken, this.chatId);
     this.ingestParticipants(chat.participants ?? []);
     this.setMessagesFromRest(chat.chat_messages ?? []);
     return this.cachedMessages ?? [];
@@ -168,7 +175,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   }
 
   async getParticipants(): Promise<Participant[]> {
-    const chat = await RestApi.getChat(this.chatId);
+    const chat = await RestApi.getChat(this.currentToken, this.chatId);
     this.ingestParticipants(chat.participants ?? []);
     return (chat.participants ?? []).map((p) => new Participant(p));
   }
@@ -220,7 +227,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     if (participantId == null) {
       throw new Error("sbx-omnichannel-conversations: no participant record for this agent in this chat — cannot send media");
     }
-    const created = await RestApi.sendMedia(this.chatId, participantId, body.media, body.filename, body.contentType, undefined);
+    const created = await RestApi.sendMedia(this.currentToken, this.chatId, participantId, body.media, body.filename, body.contentType, undefined);
     return created.id;
   }
 }

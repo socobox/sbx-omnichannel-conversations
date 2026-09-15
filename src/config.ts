@@ -3,30 +3,26 @@
 // backend instead, so it needs to know its host — that's the "host" half of "change the library
 // and the host" (the library half is the import; this is the one small addition on top of it).
 //
-// A module-level singleton, set ONCE at app bootstrap, is what lets `new Client(token)` keep
-// working with zero other call-site changes anywhere else in the app.
+// Deliberately NOT an api_key (or any other credential) — that's the tenant's own broad,
+// server-side-only secret; shipping it here would mean baking it into a browser bundle. Every
+// REST call this package makes instead reuses the SAME per-session token already passed to
+// `new Client(token)` (see internal/wsTransport.ts's own `token` getter), authenticated the same
+// way as the WS connection itself.
 export interface SbxConversationsConfig {
   /** Base URL of the SBX Omnichannel API (e.g. "https://omnichannel.example.com"). No trailing slash. */
   apiBaseUrl: string;
-  /**
-   * The SAME tenant api_key the app's own REST client already sends as `Authorization: Bearer`
-   * for every other omnichannel call — this package reuses it for its own REST reads
-   * (message history, participants), completely separate from the per-agent WS token passed to
-   * `new Client(token)`.
-   */
-  apiKey: string;
 }
 
 let currentConfig: SbxConversationsConfig | null = null;
 
 export function configure(config: SbxConversationsConfig): void {
-  currentConfig = { apiBaseUrl: config.apiBaseUrl.replace(/\/+$/, ""), apiKey: config.apiKey };
+  currentConfig = { apiBaseUrl: config.apiBaseUrl.replace(/\/+$/, "") };
 }
 
 export function getConfig(): SbxConversationsConfig {
   if (!currentConfig) {
     throw new Error(
-      "sbx-omnichannel-conversations: configure({apiBaseUrl, apiKey}) must be called once before creating a Client — see the README.",
+      "sbx-omnichannel-conversations: configure({apiBaseUrl}) must be called once before creating a Client — see the README.",
     );
   }
   return currentConfig;
