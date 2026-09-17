@@ -58,6 +58,10 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   private participantIdentities = new Map<number, string>();
   private participantIdByAgentId = new Map<number, number>();
   private pendingMessageUpdates = new Map<number, Array<(message: Message) => void>>();
+  // Ver applyUnreadCount()/getUnreadMessagesCount() más abajo — el último conteo que dio el
+  // SERVIDOR, y si algo pasó desde entonces que pudiera haberlo movido.
+  private lastKnownUnreadCount: number | null = null;
+  private unreadCountIsFresh = false;
 
   /** @internal */
   constructor(raw: RestChat, transport: WsTransport, agentId: number | null = null, ownParticipantIdFromToken: number | null = null) {
@@ -74,7 +78,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     this.ownParticipantIdFromToken = ownParticipantIdFromToken;
     this.ingestParticipants(raw.participants ?? []);
     if (raw.chat_messages?.length) {
-      this.setMessagesFromRest(raw.chat_messages);
+      this.setMessagesFromRest(raw.chat_messages, raw.unread_count ?? null);
     }
   }
 
@@ -106,13 +110,51 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     return this.participantIdByAgentId.get(this.agentId) ?? null;
   }
 
-  private setMessagesFromRest(raw: RestChatMessage[]): void {
+  /**
+   * Aplica los mensajes de un snapshot completo de `GET /chats/:id` y deriva el estado de leído
+   * del MISMO snapshot, en vez de asumir "todo leído".
+   *
+   * `unreadCount` es el `unread_count` que el backend computó para el participante de esta
+   * sesión. Como el snapshot trae el historial entero, "k no leídos" fija `lastReadMessageIndex`
+   * exactamente: es el índice del mensaje k-ésimo desde el final, menos uno. Asumir "todo leído"
+   * acá era lo que hacía que esta propiedad contradijera su propio comentario de clase — el
+   * conteo volvía persistido del servidor mientras el índice de al lado se reseteaba en cada
+   * recarga.
+   */
+  private setMessagesFromRest(raw: RestChatMessage[], unreadCount: number | null): void {
     this.cachedMessages = raw.map((m) => new Message(m, this));
     const last = this.cachedMessages[this.cachedMessages.length - 1];
-    if (last) {
-      this.lastMessage = { index: last.index, dateCreated: last.dateCreated };
-      this.lastReadMessageIndex = last.index;
-    }
+    if (!last) return;
+    this.lastMessage = { index: last.index, dateCreated: last.dateCreated };
+    this.lastReadMessageIndex = this.deriveLastReadIndex(this.cachedMessages, unreadCount);
+    this.applyUnreadCount(unreadCount);
+  }
+
+  /**
+   * `unreadCount` null significa que el backend no tenía contra qué computar (token de cliente,
+   * o sin registro de participante en este chat): no hay estado de leído que derivar, así que
+   * vale el default de siempre — "todo leído", el modo de falla que no pinta badges espurios.
+   */
+  private deriveLastReadIndex(messages: Message[], unreadCount: number | null): number | null {
+    const last = messages[messages.length - 1];
+    if (!last) return null;
+    if (unreadCount == null || unreadCount <= 0) return last.index;
+    const lastReadPosition = messages.length - unreadCount - 1;
+    // Todo (o más que todo — el backend cuenta contra ids, no contra posiciones) está sin leer.
+    // -1 es el centinela que el menú "marcar como leído/no leído" del consumidor lee
+    // (ChatItemMenuComponent.tsx:41).
+    return lastReadPosition < 0 ? -1 : messages[lastReadPosition]!.index;
+  }
+
+  /**
+   * Registra la respuesta del backend, venga del snapshot que venga (hidratación, refresh de
+   * reconexión, o un `setAllMessagesRead`/`Unread` propio). No es una caché de propósito
+   * general: solo sirve para no repetir un `GET /chats/:id` que este objeto ya acaba de hacer —
+   * ver `getUnreadMessagesCount()` más abajo para el porqué exacto.
+   */
+  private applyUnreadCount(unreadCount: number | null): void {
+    this.lastKnownUnreadCount = unreadCount;
+    this.unreadCountIsFresh = true;
   }
 
   /** @internal — called by Client when a fresh message.new/message.updated arrives over WS. */
@@ -133,6 +175,10 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     let messageUpdateReasons: MessageUpdateReason[] = [];
     if (reason === "added") {
       this.lastMessage = { index: message.index, dateCreated: message.dateCreated };
+      // El conteo cacheado ya no vale: un mensaje nuevo pudo haberlo movido. Invalidar en vez de
+      // incrementar localmente delega la decisión de "¿es mío o del cliente?" al backend, que es
+      // quien la define — evita tener que acertar acá la misma regla que él ya aplica.
+      this.unreadCountIsFresh = false;
       this.emit(ConversationEvent.MessageAdded, message);
     } else {
       // Diffed against the PREVIOUSLY cached copy — both a body edit and an attributes/reaction
@@ -190,15 +236,13 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     this.ingestParticipants(raw.participants ?? []);
 
     if (raw.chat_messages?.length) {
-      const previousLastRead = this.lastReadMessageIndex;
       const previousLastIndex = this.lastMessage?.index ?? null;
       const knownIndexes = new Set((this.cachedMessages ?? []).map((m) => m.index));
-      this.setMessagesFromRest(raw.chat_messages);
-      // setMessagesFromRest marks everything read, which is right for a FIRST hydration and
-      // wrong for a refresh: it would silently clear the unread state for every message that
-      // landed while the socket was down. Read state is in-memory only, so the pre-refresh
-      // value is the only truth there is.
-      this.lastReadMessageIndex = previousLastRead;
+      this.setMessagesFromRest(raw.chat_messages, raw.unread_count ?? null);
+      // Ya no se preserva ningún valor previo: el `unread_count` de ESTE snapshot ES el estado
+      // de leído, así que re-derivarlo (ver deriveLastReadIndex) es estrictamente mejor que
+      // arrastrar una suposición local. El viejo restore de `previousLastRead` existía solo
+      // porque el estado era en memoria y el snapshot no tenía nada que decir al respecto.
       if (this.lastMessage && this.lastMessage.index !== previousLastIndex) {
         updateReasons.push(ConversationUpdateReason.LastMessage);
       }
@@ -217,6 +261,12 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
       }
     }
 
+    // DELIBERADAMENTE no se agrega ConversationUpdateReason.LastReadMessageIndex acá, ni aunque
+    // el valor derivado se haya movido: sbx-omnichannel-ui trata esa razón como "el agente
+    // acaba de marcar como leído" y pone el badge en cero (ChatContext.tsx:439-455, cuyo propio
+    // comentario dice que depende de que refreshFromRest se quede callado). Emitirla en cada
+    // reconexión borraría el badge de los mensajes llegados durante el corte — exactamente el
+    // bug que 255723f vino a arreglar.
     if (updateReasons.length) this.emit(ConversationEvent.Updated, { conversation: this, updateReasons });
   }
 
@@ -230,7 +280,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     if (this.cachedMessages) return this.cachedMessages;
     const chat = await RestApi.getChat(this.currentToken, this.chatId);
     this.ingestParticipants(chat.participants ?? []);
-    this.setMessagesFromRest(chat.chat_messages ?? []);
+    this.setMessagesFromRest(chat.chat_messages ?? [], chat.unread_count ?? null);
     return this.cachedMessages ?? [];
   }
 
@@ -251,17 +301,41 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   }
 
   /**
-   * Backend-computed (see the class-level `lastReadMessageIndex` comment) — a fresh REST call
-   * every time, same as Twilio's own real, always-live contract (never a locally cached value
-   * that could go stale). Resolves `null` when the backend had nothing to compute it against (no
-   * agent identity on this session, or no participant record in this chat) — the same
-   * "I don't know, compute it yourself" signal Twilio's own SDK can return, which
-   * `sbx-omnichannel-ui`'s ChatContext already falls back on (`lastMessageIndex - lastReadIndex`)
-   * for exactly this case.
+   * Computado por el backend (ver el comentario de clase de `lastReadMessageIndex`). Nunca
+   * devuelve un valor que pueda haber quedado obsoleto: se re-pide en cuanto algo pasó desde la
+   * última respuesta del servidor — un mensaje nuevo o un marcado propio. Lo que NO hace es
+   * volver a preguntar cuando la respuesta sigue siendo la misma que el servidor acaba de dar.
+   *
+   * Resuelve `null` cuando el backend no tenía contra qué computarlo (sin identidad de agente en
+   * esta sesión, o sin registro de participante en este chat) — el mismo "no lo sé, computalo
+   * vos" que el SDK de Twilio puede devolver, y del que ChatContext de sbx-omnichannel-ui ya
+   * hace fallback (`lastMessageIndex - lastReadIndex`).
    */
   async getUnreadMessagesCount(): Promise<number | null> {
+    if (this.unreadCountIsFresh) return this.lastKnownUnreadCount;
     const chat = await RestApi.getChat(this.currentToken, this.chatId);
-    return chat.unread_count ?? null;
+    this.applyUnreadCount(chat.unread_count ?? null);
+    return this.lastKnownUnreadCount;
+  }
+
+  /**
+   * `RestApi.updateParticipant` ya rechaza en un status non-2xx (restApi.ts#request), pero el
+   * backend también tiene una forma 200-con-`{success: false}` para una validación rechazada
+   * (por eso el tipo de retorno es una unión, restApi.ts). Tratar las dos igual es todo el
+   * punto: antes, un guardado rechazado por esa vía igual avanzaba lastReadMessageIndex y emitía
+   * `updated`, así que la UI limpiaba su badge por una escritura que nunca aterrizó — y el
+   * siguiente getUnreadMessagesCount() lo traía de vuelta, sin nada que explicara el parpadeo.
+   */
+  private async persistLastRead(participantId: number, lastReadMessageId: number | null): Promise<void> {
+    const result = await RestApi.updateParticipant(this.currentToken, this.chatId, participantId, {
+      last_read_message_id: lastReadMessageId,
+    });
+    if (!result.success) {
+      const detail = result.errors ? `: ${JSON.stringify(result.errors)}` : "";
+      throw new Error(
+        `sbx-omnichannel-conversations: the backend rejected the read-state update for participant ${participantId} in chat ${this.chatId}${detail}`,
+      );
+    }
   }
 
   /**
@@ -276,9 +350,13 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     const participantId = this.resolveOwnParticipantId();
     if (participantId == null || !this.lastMessage) return 0;
 
-    await RestApi.updateParticipant(this.currentToken, this.chatId, participantId, { last_read_message_id: this.lastMessage.index });
+    await this.persistLastRead(participantId, this.lastMessage.index);
     this.lastReadMessageIndex = this.lastMessage.index;
-    this.emit("updated", { conversation: this, updateReasons: ["lastReadMessageIndex"] });
+    this.applyUnreadCount(0);
+    this.emit(ConversationEvent.Updated, {
+      conversation: this,
+      updateReasons: [ConversationUpdateReason.LastReadMessageIndex],
+    });
     return 0;
   }
 
@@ -287,14 +365,20 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
    * locally, since only the server actually knows the chat's true total message count. */
   async setAllMessagesUnread(): Promise<number> {
     const participantId = this.resolveOwnParticipantId();
-    if (participantId == null) {
-      this.lastReadMessageIndex = -1;
-      return 0;
-    }
+    // Sin participante no hay nada que persistir ni nada que contar: se devuelve 0 sin tocar
+    // nada, igual que setAllMessagesRead. Antes, esta rama movía lastReadMessageIndex a -1 SIN
+    // emitir `updated`, así que la propiedad pública y el flujo de eventos se contradecían y la
+    // etiqueta del menú marcar-como-leído/no-leído del consumidor (ChatItemMenuComponent.tsx:41)
+    // se invertía por una escritura que nunca ocurrió.
+    if (participantId == null) return 0;
 
-    await RestApi.updateParticipant(this.currentToken, this.chatId, participantId, { last_read_message_id: null });
+    await this.persistLastRead(participantId, null);
     this.lastReadMessageIndex = -1;
-    this.emit("updated", { conversation: this, updateReasons: ["lastReadMessageIndex"] });
+    this.unreadCountIsFresh = false;
+    this.emit(ConversationEvent.Updated, {
+      conversation: this,
+      updateReasons: [ConversationUpdateReason.LastReadMessageIndex],
+    });
     return (await this.getUnreadMessagesCount()) ?? 0;
   }
 
