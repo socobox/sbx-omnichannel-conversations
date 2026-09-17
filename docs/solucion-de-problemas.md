@@ -181,12 +181,21 @@ client.on("conversationUpdated", async ({ conversation, updateReasons }) => {
 
 **Hasta la v0.2.0** devolvía `null` siempre, a propósito.
 
-**Desde la v0.3.0** devuelve el conteo real, y solo `null` cuando de verdad no lo sabe: si todavía
-no se cargó el historial de ese chat.
+**Desde la v0.3.0 (persistencia server-side)** devuelve el conteo que computa el backend, y solo
+`null` cuando el backend de verdad no tiene contra qué computarlo: sin identidad de agente en esta
+sesión, o sin registro de participante para esta sesión en ese chat. Ya no tiene relación con si
+el historial de mensajes está cargado o no en este objeto — eso lo resuelve el propio backend.
 
 **Lo que no debes hacer si te devuelve `null`:** restar `lastMessage.index` menos el último índice
 leído. Esos son identificadores de base de datos, no posiciones, y su diferencia no es una
-cantidad de mensajes. Cuenta los elementos del historial.
+cantidad de mensajes.
+
+**Si el resultado tarda o parece obsoleto:** `getUnreadMessagesCount()` no golpea la red en cada
+llamada — reutiliza el `unread_count` del último snapshot mientras nada haya podido moverlo
+(ningún mensaje nuevo, ningún marcado propio). Si sospechás que quedó desactualizado por algo que
+esta librería no puede ver (otra sesión del mismo agente marcando leído en otra pestaña), no hay
+push por WebSocket para ese caso — es un hueco conocido, documentado en el comentario de clase de
+`lastReadMessageIndex`.
 
 ---
 

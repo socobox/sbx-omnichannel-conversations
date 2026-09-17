@@ -18,7 +18,7 @@ un chat. `sid` es la columna `conversation_sid` de zavu (con el id numérico com
 | `attributes` | `JSONValue` | `chats.metadata` tal cual — objeto arbitrario de campos custom. |
 | `status` | `string` | Ej. `"in_progress"`, `"finish"`. Cambia vía `refreshFromRest` en cada reconexión. |
 | `lastMessage` | `{ index: number; dateCreated: Date } \| null` | El último mensaje conocido. `index` es un id de fila de base de datos — ver `message.md`. |
-| `lastReadMessageIndex` | `number \| null` | Solo en memoria — ver la sección de no leídos más abajo. |
+| `lastReadMessageIndex` | `number \| null` | Persistido server-side desde la v0.3.0 — sobrevive un reload de página. Se deriva del `unread_count` que devuelve el backend en cada snapshot; ver la sección de no leídos más abajo. |
 
 ## Eventos de instancia
 
@@ -30,7 +30,7 @@ el detalle de qué `ConversationUpdateReason` corresponde a cada disparador de `
 | `"lastMessage"` | Llega un mensaje nuevo (`message.new`) o, en una reconexión, el `lastMessage.index` cambió respecto al que tenías antes de refrescar. | `Conversation.ts:142`, `192` |
 | `"attributes"` | En una reconexión, `chats.metadata` cambió respecto a lo que tenías cacheado; o alguien llama `applyAttributesUpdate` directamente. | `Conversation.ts:173`, `202` |
 | `"status"` | En una reconexión, `chats.status` cambió (ej. de `"in_progress"` a `"finish"`). | `Conversation.ts:177` |
-| `"lastReadMessageIndex"` | Llamaste `setAllMessagesRead()` o `setAllMessagesUnread()`. | `Conversation.ts:277-279` |
+| `"lastReadMessageIndex"` | Llamaste `setAllMessagesRead()` o `setAllMessagesUnread()` y el backend aceptó el guardado. **Nunca** se emite desde `refreshFromRest()` (reconexión) aunque el valor derivado haya cambiado — a propósito, ver la nota de esa función. | `Conversation.ts:358`, `380` |
 
 `ConversationUpdateReason` también declara `"dateCreated"`, `"dateUpdated"`, `"friendlyName"` y
 `"state"` (ver `types.md`) — ninguno de los cuatro se emite hoy en ninguna parte del código; están
@@ -100,8 +100,8 @@ si el chat no existe o el token no tiene acceso.
 
 ### `getUnreadMessagesCount()`
 
-**Qué hace.** Devuelve cuántos mensajes cacheados tienen un `index` mayor que
-`lastReadMessageIndex`.
+**Qué hace.** Devuelve el conteo de no leídos que computa el backend, cacheado hasta que algo
+pudiera haberlo movido (ver "Qué esperar" abajo).
 
 **Cuándo la usas.** Para pintar el badge de "no leídos" de un chat en la lista de conversaciones.
 
@@ -114,31 +114,37 @@ async getUnreadMessagesCount(): Promise<number | null>;
 ```ts
 const conversation = await client.getConversationBySid("CH-a83f1");
 const unread = await conversation.getUnreadMessagesCount();
-console.log(unread); // 2 — dos mensajes con index > lastReadMessageIndex
+console.log(unread); // 2 — el unread_count que devolvió el backend
 ```
 
-**Qué esperar.** Un número exacto si ya hay historial cargado (`cachedMessages` no es `null`), o
-`null` si de verdad no se ha cargado nada todavía — eso sí es "no lo sé", no un cero disfrazado.
+**Qué esperar.** Un número exacto si el backend tenía contra qué computarlo, o `null` si no tenía
+identidad de agente en esta sesión o esta sesión no tiene registro de participante en el chat —
+eso sí es "no lo sé", no un cero disfrazado.
 
-> **Cambio en v0.3.0.** Antes esta función SIEMPRE devolvía `null`, con el argumento de que nada se
-> persiste server-side. Eso seguía siendo cierto (sigue sin haber una columna de "leído hasta el
-> mensaje N" en el backend), pero confundía "no persistido" con "no calculable": mientras el
-> objeto `Conversation` vive en memoria, la caché de mensajes más el último índice marcado como
-> leído SÍ es una respuesta exacta. Antes de este cambio, la alternativa que le quedaba a quien
-> llamaba esto era restar `lastMessage.index - lastReadMessageIndex` — y **eso no cuenta
-> mensajes**, porque esos índices son ids de fila de base de datos compartidos entre TODOS los
-> chats del tenant (ver `message.md`). Solo parecía funcionar antes porque ambos lados solían
-> coincidir, dando cero.
+No es una llamada de red incondicional: la primera vez (tras hidratar o reconectar) devuelve el
+`unread_count` que ya vino en ESE snapshot, sin pedir nada — recién vuelve a golpear
+`GET /chats/:id` cuando algo pudo haberlo movido (llegó un mensaje nuevo, o esta misma sesión
+marcó leído/no leído). Sin esto, cada llamada duplicaba el `GET /chats/:id` que la hidratación de
+esa conversación ya acababa de hacer un instante antes — multiplicado por cada chat del agente, en
+cada reconexión.
 
-**Qué puede salir mal.** No lanza. El error de uso más común es asumir que el resultado sobrevive
-un reload de página — no sobrevive: `lastReadMessageIndex` es enteramente en memoria (ver la nota
-de la propiedad de clase en `Conversation.ts:36-41`), así que tras recargar la página vuelve a
-"todo leído" por defecto.
+> **Cambio en v0.3.0.** Antes esta función SIEMPRE devolvía `null` (nada se persistía server-side).
+> Un primer paso computaba el conteo localmente desde `cachedMessages` — exacto, pero se perdía en
+> cada recarga completa de página, porque no había dónde guardarlo entre cargas. Desde entonces el
+> backend persiste `participants.last_read_message_id`/`last_read_at` de verdad
+> (`PUT /web_chats/:id/participants/:id`, ver `setAllMessagesRead()`), así que el conteo sobrevive
+> un reload: `getUnreadMessagesCount()` computa contra ESE valor, no contra memoria efímera.
+
+**Qué puede salir mal.** Si el `GET /chats/:id` de refresco falla (chat borrado, token sin acceso,
+red caída), rechaza con el mismo formato de error REST de siempre — a diferencia de la v0.3.0
+original, esta ya no es una operación que "no lanza nunca": depende de una llamada de red real
+cuando el conteo cacheado dejó de ser válido.
 
 ### `setAllMessagesRead()`
 
-**Qué hace.** Marca `lastReadMessageIndex` como el índice del último mensaje conocido, y emite
-`updated` con razón `"lastReadMessageIndex"`.
+**Qué hace.** Persiste "leído hasta el último mensaje" en el backend
+(`PUT /web_chats/:id/participants/:id`, campo `last_read_message_id`), actualiza
+`lastReadMessageIndex` localmente, y emite `updated` con razón `"lastReadMessageIndex"`.
 
 **Cuándo la usas.** Cuando el agente abre o enfoca un chat y quieres limpiar su badge de no
 leídos.
@@ -157,19 +163,32 @@ conversation.on("updated", ({ updateReasons }) => {
 await conversation.setAllMessagesRead();
 ```
 
-**Qué esperar.** Devuelve `0` siempre (coincide con el contrato de retorno de Twilio: "no leídos
-resultantes"). Efecto secundario real: dispara `updated`/`conversationUpdated` con razón
-`"lastReadMessageIndex"` — **antes de v0.3.0 este evento no se emitía en absoluto aquí**, así que
-un handler que ya escribiste para reaccionar a esa razón nunca se disparaba y el badge se quedaba
-pegado hasta el siguiente reload completo de página.
+**Qué esperar.** Devuelve `0` siempre que el guardado se acepte (coincide con el contrato de
+retorno de Twilio: "no leídos resultantes"). Efecto secundario real: dispara
+`updated`/`conversationUpdated` con razón `"lastReadMessageIndex"` — **antes de v0.3.0 este evento
+no se emitía en absoluto aquí**, así que un handler que ya escribiste para reaccionar a esa razón
+nunca se disparaba y el badge se quedaba pegado hasta el siguiente reload completo de página.
 
-**Qué puede salir mal.** No lanza. Es enteramente en memoria — no hay nada que fallar contra un
-backend.
+Sin efecto (resuelve `0` sin llamar al backend) si esta sesión no tiene un participante resoluble
+en este chat, o si todavía no hay ningún mensaje conocido.
+
+> **Cambio posterior.** El guardado ahora persiste server-side de verdad (antes era enteramente en
+> memoria, se perdía en cada recarga de página). Si el backend rechaza el guardado — un `PUT` con
+> `{success: false}`, distinto de un error HTTP — esta llamada **lanza**, y ni el estado local ni
+> el evento `updated` avanzan: antes de este ajuste, un rechazo así se ignoraba en silencio y el
+> consumidor limpiaba su badge por una escritura que nunca aterrizó.
+
+**Qué puede salir mal.**
+- El backend rechaza el `PUT` (HTTP no-2xx, o `200` con `{success: false}`): rechaza con
+  `"...the backend rejected the read-state update for participant <id> in chat <id>..."`.
+- Si el `PUT` sale bien pero la sesión no tiene participante resoluble o no hay mensaje conocido:
+  no lanza, simplemente no hace nada (ver "Qué esperar").
 
 ### `setAllMessagesUnread()`
 
-**Qué hace.** Marca todo el historial cacheado como no leído (`lastReadMessageIndex = -1`) y
-devuelve el conteo real resultante.
+**Qué hace.** Persiste "nada leído todavía" en el backend (`last_read_message_id: null`), marca
+`lastReadMessageIndex = -1` localmente, emite `updated`, y devuelve el conteo real resultante
+(re-consultado al backend).
 
 **Cuándo la usas.** Poco común en un flujo normal de agente — típicamente una acción manual de
 "marcar como no leído" en un menú contextual de la lista de chats.
@@ -182,19 +201,21 @@ async setAllMessagesUnread(): Promise<number>;
 **Ejemplo.**
 ```ts
 const count = await conversation.setAllMessagesUnread();
-console.log(count); // 3 — el total real de mensajes cacheados
+console.log(count); // 3 — el unread_count que devuelve el backend tras el guardado
 ```
 
-**Qué esperar.** El conteo real de mensajes en caché.
+**Qué esperar.** El conteo real que computa el backend después de marcar todo como no leído. Sin
+participante resoluble en este chat: no llama al backend, no toca `lastReadMessageIndex`, y
+resuelve `0` — simétrico con `setAllMessagesRead()` en ese mismo caso.
 
-> **Cambio en v0.3.0.** Antes esto devolvía `lastMessage.index + 1` — y ese `+1` sobre un id de
-> fila de base de datos (ver `message.md`) nunca fue una cantidad de mensajes: si el último mensaje
-> tenía `index: 4180`, el valor devuelto era `4181`, sin relación alguna con cuántos mensajes tenía
-> realmente el chat. Ahora es un conteo genuino de elementos en `cachedMessages`.
+> **Cambio en v0.3.0 y después.** Primero pasó de devolver `lastMessage.index + 1` (un id de fila
+> de base de datos con un uno sumado, nunca una cantidad de mensajes) a un conteo local genuino.
+> Ahora persiste server-side y el conteo devuelto viene del backend, no de `cachedMessages`.
 
 También dispara `updated` con razón `"lastReadMessageIndex"`, igual que `setAllMessagesRead()`.
 
-**Qué puede salir mal.** No lanza.
+**Qué puede salir mal.** Mismo camino de rechazo que `setAllMessagesRead()` si el backend rechaza
+el guardado.
 
 ### `prepareMessage()`
 
