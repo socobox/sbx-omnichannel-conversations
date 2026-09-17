@@ -24,13 +24,14 @@ function msg(id: number, body = `m${id}`): RestChatMessage {
   };
 }
 
-function chat(id: number, messages: RestChatMessage[] = [msg(4102)]): RestChat {
+function chat(id: number, messages: RestChatMessage[] = [msg(4102)], unread_count: number | null = null): RestChat {
   return {
     id, name: `chat ${id}`, conversation_sid: `CH${id}`, status: "in_progress", duration: null,
     metadata: {}, source: "web", client: "web", omnichannel_tag: [],
     created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString(),
     participants: [{ id: 10, agent_id: null, indentify: "customer_1", name: "Ada", sid: null, conversation_sid: null, chat_id: id, participant_type: "USER", metadata: {}, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() }],
     chat_messages: messages,
+    unread_count,
   };
 }
 
@@ -247,17 +248,39 @@ describe("reconexión: re-hidratación", () => {
   });
 
   it("preserva el estado de no leídos al re-hidratar", async () => {
+    chats.set("1", chat(1, [msg(4102)], 0));
     const client = await Client.create("agent-token");
     clients.push(client);
     const conversation = (await client.getSubscribedConversations()).items[0] as any;
     expect(await conversation.getUnreadMessagesCount()).toBe(0);
 
-    chats.set("1", chat(1, [msg(4102), msg(4190), msg(4191)]));
+    // El backend sigue vivo durante el corte, acumula dos mensajes, y su unread_count lo refleja
+    // — el servidor es la fuente de verdad ahora, no un valor que este objeto tuviera que
+    // preservar por su cuenta desde antes del corte.
+    chats.set("1", chat(1, [msg(4102), msg(4190), msg(4191)], 2));
     await forceReconnect(client);
 
-    // setMessagesFromRest marca todo como leído, lo cual es correcto en la PRIMERA hidratación
-    // y borraría el badge de todo lo llegado durante el corte si se aplicara en un refresh.
     expect(await conversation.getUnreadMessagesCount()).toBe(2);
+    expect(conversation.lastReadMessageIndex).toBe(4102);
+  });
+
+  it("re-hidratar NO emite lastReadMessageIndex, aunque el estado de leído haya cambiado", async () => {
+    // Guarda de compatibilidad con el consumidor: ChatContext.tsx trata esa razón como "el
+    // agente acaba de marcar como leído" y pone el badge en 0. Si refreshFromRest la emitiera,
+    // cada reconexión borraría el badge de todo lo llegado durante el corte — el bug exacto que
+    // el release de persistencia server-side vino a arreglar, reintroducido por la puerta de
+    // atrás.
+    const client = await Client.create("agent-token");
+    clients.push(client);
+
+    const razones: string[] = [];
+    client.on("conversationUpdated", ({ updateReasons }: any) => razones.push(...updateReasons));
+
+    chats.set("1", chat(1, [msg(4102), msg(4190)], 1));
+    await forceReconnect(client);
+
+    expect(razones).toContain("lastMessage");
+    expect(razones).not.toContain("lastReadMessageIndex");
   });
 
   it("emite conversationLeft con la instancia cacheada cuando el chat deja de estar asignado", async () => {
