@@ -13,6 +13,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      # Sin este paso, un .nvmrc invalido solo se descubriria en el job de publish,
+      # es decir al publicar. Aqui es un guard barato sobre el pin.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
       - run: bun install
       - run: bun run build
       - run: bun test
