@@ -67,6 +67,12 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private resolveInit!: () => void;
   private rejectInit!: (error: ConnectionError) => void;
   private initSettled = false;
+  // A 'chat'-scope (customer) token carries its own participant_id claim directly (unambiguous —
+  // that token is scoped to exactly one chat) — used the same way agentId is, to resolve "who am
+  // I" for setAllMessagesRead/setAllMessagesUnread on the CUSTOMER side (the agent side resolves
+  // via agentId + Conversation's own per-chat participant map instead, since one agent token is
+  // reused across many chats).
+  private ownParticipantId: number | null = null;
 
   constructor(token: string) {
     super();
@@ -82,6 +88,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     // awaits the ORIGINAL promise, which this does not affect.
     void this.initPromise.catch(() => undefined);
     this.agentId = this.decodeAgentId(token);
+    this.ownParticipantId = this.decodeParticipantId(token);
     this.transport = this.buildTransport(token);
     this.scheduleExpiryTimers(token);
   }
@@ -126,6 +133,11 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private decodeAgentId(token: string): number | null {
     const payload = decodeJwtPayload(token);
     return typeof payload?.agent_id === "number" ? payload.agent_id : null;
+  }
+
+  private decodeParticipantId(token: string): number | null {
+    const payload = decodeJwtPayload(token);
+    return typeof payload?.participant_id === "number" ? payload.participant_id : null;
   }
 
   private buildTransport(token: string): WsTransport {
@@ -255,7 +267,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       existing.refreshFromRest(chat);
       return;
     }
-    const conversation = new Conversation(chat, this.transport, this.agentId);
+    const conversation = new Conversation(chat, this.transport, this.agentId, this.ownParticipantId);
     conversation.on(ConversationEvent.Updated, (payload) => this.emit(ClientEvent.ConversationUpdated, payload));
     this.conversationsByChatId.set(chatId, conversation);
     this.emit(ClientEvent.ConversationJoined, conversation);
@@ -295,7 +307,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   /**
    * Emits only on a real transition, exactly like WsTransport#setState. Two deliberate
    * consequences: `initialized` is NOT re-emitted on a reconnect (Twilio initializes a Client
-   * once, and consumers do one-shot bootstrap work in that handler); and "failed" -> 
+   * once, and consumers do one-shot bootstrap work in that handler); and "failed" ->
    * "initialized" IS possible when a failed client recovers via updateToken(freshToken). The
    * init promise itself stays rejected — a promise settles once — which is why what fails is
    * Client.create(), not the Client object forever.
@@ -361,6 +373,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
 
   async updateToken(token: string): Promise<void> {
     this.agentId = this.decodeAgentId(token);
+    this.ownParticipantId = this.decodeParticipantId(token);
     this.transport.updateToken(token);
     this.scheduleExpiryTimers(token);
   }

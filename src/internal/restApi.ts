@@ -60,6 +60,10 @@ export interface RestChat {
   updated_at: string;
   chat_messages?: RestChatMessage[];
   participants?: RestParticipant[];
+  // Persisted, backend-computed unread count for the agent this session's own token identifies
+  // (see zavu's chat.repo.ts#loadUnreadCounts) — null when nothing to compute against (a 'chat'-
+  // scope/customer token, or an agent with no participant record in this chat).
+  unread_count?: number | null;
 }
 
 const paths = {
@@ -129,6 +133,22 @@ export function getMessageMediaUrl(token: string, chatId: number, messageId: num
   return request(token, paths.webChatMessageMediaUrl(chatId, messageId));
 }
 
+// Backs Conversation#setAllMessagesRead/setAllMessagesUnread — persists "the last message this
+// agent has read in this chat" server-side (see this package's README: this used to be an
+// in-memory-only stub, lost on every page reload). `last_read_message_id: null` marks the whole
+// chat unread again.
+export function updateParticipant(
+  token: string,
+  chatId: number,
+  participantId: number,
+  fields: { last_read_message_id: number | null },
+): Promise<{ success: true } | { success: false; errors?: Record<string, string[]> }> {
+  return request(token, `/web_chats/${chatId}/participants/${participantId}`, {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  });
+}
+
 // Genuinely new capability (see this package's README) — proxies an agent's outbound attachment
 // to zavu's own SBX upload endpoint and creates the message in one round trip. Only works for
 // `client === 'web'` chats; the backend rejects (422) anything else.
@@ -152,4 +172,4 @@ export function sendMedia(
   return requestForm<RestChatMessage>(token, paths.webChatMessages(chatId), form);
 }
 
-export const RestApi = { getChat, updateMessage, getMessageMediaUrl, sendMedia };
+export const RestApi = { getChat, updateMessage, getMessageMediaUrl, sendMedia, updateParticipant };
