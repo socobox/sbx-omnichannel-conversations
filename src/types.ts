@@ -1,19 +1,49 @@
 // Mirrors @twilio/conversations' own public type names exactly, so a consumer migrating off
 // Twilio can keep the same TypeScript annotations in most call sites.
 
-export type ConnectionState = "connecting" | "connected" | "disconnecting" | "disconnected" | "denied";
+export const ConnectionState = {
+  Connecting: "connecting",
+  Connected: "connected",
+  Disconnecting: "disconnecting",
+  Disconnected: "disconnected",
+  Denied: "denied",
+} as const;
+export type ConnectionState = (typeof ConnectionState)[keyof typeof ConnectionState];
 
-export type ConversationUpdateReason =
-  | "attributes"
-  | "dateCreated"
-  | "dateUpdated"
-  | "friendlyName"
-  | "lastReadMessageIndex"
-  | "lastMessage"
-  | "state"
-  | "status";
+/**
+ * Mirrors @twilio/conversations' own `State` — the lifecycle of the Client OBJECT, which is a
+ * different thing from ConnectionState (the lifecycle of its socket). A Client initializes
+ * exactly once; every reconnection after that is reported through ConnectionState alone.
+ *
+ * Named ClientState, not State, on purpose: `State` is a common enough name that a consumer is
+ * likely to already have one (sbx-omnichannel-ui does), and colliding on the import costs the
+ * caller an alias for no benefit.
+ */
+export const ClientState = {
+  Initialized: "initialized",
+  Failed: "failed",
+} as const;
+export type ClientState = (typeof ClientState)[keyof typeof ClientState];
 
-export type MessageUpdateReason = "body" | "attributes" | "dateUpdated" | "deliveryReceipt";
+export const ConversationUpdateReason = {
+  Attributes: "attributes",
+  DateCreated: "dateCreated",
+  DateUpdated: "dateUpdated",
+  FriendlyName: "friendlyName",
+  LastReadMessageIndex: "lastReadMessageIndex",
+  LastMessage: "lastMessage",
+  State: "state",
+  Status: "status",
+} as const;
+export type ConversationUpdateReason = (typeof ConversationUpdateReason)[keyof typeof ConversationUpdateReason];
+
+export const MessageUpdateReason = {
+  Body: "body",
+  Attributes: "attributes",
+  DateUpdated: "dateUpdated",
+  DeliveryReceipt: "deliveryReceipt",
+} as const;
+export type MessageUpdateReason = (typeof MessageUpdateReason)[keyof typeof MessageUpdateReason];
 
 // Matches @twilio/conversations' own JSONValue exactly (its Message/Conversation `attributes`
 // getters, and every attributes-accepting method, are typed against this, not a plain
