@@ -30,9 +30,11 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   status: string;
   lastMessage: { index: number; dateCreated: Date } | null = null;
   /**
-   * No persisted read-tracking exists on the backend yet (a real, documented gap — see the
-   * README). Defaults to "fully read" (the safer failure mode: no spurious unread badges) and
-   * only ever changes for the lifetime of this in-memory object via `setAllMessagesRead()`.
+   * Persisted server-side (see getUnreadMessagesCount/setAllMessagesRead/setAllMessagesUnread) —
+   * survives a page reload, unlike this package's earlier v1 (an in-memory-only value, reset to
+   * "fully read" on every reconnect, since there was nowhere else to keep it). Still only updated
+   * locally by calling setAllMessagesRead/setAllMessagesUnread — there's no WS push for a read
+   * receipt happening on some OTHER client instance.
    */
   lastReadMessageIndex: number | null = null;
 
@@ -43,13 +45,18 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   // carries `agent_id` the same way (decoded once, in Client). Needed ONLY to resolve which
   // participant row is "this agent" for the media-send path — see sendMessage() below.
   private readonly agentId: number | null;
+  // A 'chat'-scope (customer) token's own participant_id claim (see Client's own comment) — used
+  // by resolveOwnParticipantId() below as the direct, unambiguous answer for a customer session
+  // (an agent session has no such single-chat claim, so it still resolves via agentId + the
+  // per-chat participantIdByAgentId map instead).
+  private readonly ownParticipantIdFromToken: number | null;
   private cachedMessages: Message[] | null = null;
   private participantIdentities = new Map<number, string>();
   private participantIdByAgentId = new Map<number, number>();
   private pendingMessageUpdates = new Map<number, Array<(message: Message) => void>>();
 
   /** @internal */
-  constructor(raw: RestChat, transport: WsTransport, agentId: number | null = null) {
+  constructor(raw: RestChat, transport: WsTransport, agentId: number | null = null, ownParticipantIdFromToken: number | null = null) {
     super();
     this.chatId = raw.id;
     this.sid = raw.conversation_sid ?? String(raw.id);
@@ -60,6 +67,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     this.status = raw.status;
     this.transport = transport;
     this.agentId = agentId;
+    this.ownParticipantIdFromToken = ownParticipantIdFromToken;
     this.ingestParticipants(raw.participants ?? []);
     if (raw.chat_messages?.length) {
       this.setMessagesFromRest(raw.chat_messages);
@@ -86,8 +94,10 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     }
   }
 
-  /** @internal — used by sendMessage's media branch to resolve "which participant is me". */
+  /** @internal — used by sendMessage's media branch and setAllMessagesRead/Unread to resolve
+   * "which participant is me". */
   private resolveOwnParticipantId(): number | null {
+    if (this.ownParticipantIdFromToken != null) return this.ownParticipantIdFromToken;
     if (this.agentId == null) return null;
     return this.participantIdByAgentId.get(this.agentId) ?? null;
   }
@@ -181,26 +191,51 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   }
 
   /**
-   * No backend read-tracking exists yet (see the class-level `lastReadMessageIndex` comment) —
-   * always resolves `null`, the same "I don't know, compute it yourself" signal Twilio's own SDK
-   * can return, which `sbx-omnichannel-ui`'s ChatContext already falls back on
-   * (`lastMessageIndex - lastReadIndex`) for exactly this case.
+   * Backend-computed (see the class-level `lastReadMessageIndex` comment) — a fresh REST call
+   * every time, same as Twilio's own real, always-live contract (never a locally cached value
+   * that could go stale). Resolves `null` when the backend had nothing to compute it against (no
+   * agent identity on this session, or no participant record in this chat) — the same
+   * "I don't know, compute it yourself" signal Twilio's own SDK can return, which
+   * `sbx-omnichannel-ui`'s ChatContext already falls back on (`lastMessageIndex - lastReadIndex`)
+   * for exactly this case.
    */
   async getUnreadMessagesCount(): Promise<number | null> {
-    return null;
+    const chat = await RestApi.getChat(this.currentToken, this.chatId);
+    return chat.unread_count ?? null;
   }
 
-  /** In-memory only — see the class-level `lastReadMessageIndex` comment. Matches Twilio's own
-   * return contract (resulting unread count) even though nothing is actually persisted. */
+  /**
+   * Persists "read up to the last message" server-side (see the class-level `lastReadMessageIndex`
+   * comment — this used to be in-memory only). Matches Twilio's own return contract (resulting
+   * unread count, always 0 once everything's marked read). A no-op (resolves 0 without a network
+   * call) when this session has no resolvable participant in this chat or there's nothing to mark
+   * read yet — same "nothing to do" cases sendMessage's media branch already treats this way,
+   * except here it's not worth throwing over.
+   */
   async setAllMessagesRead(): Promise<number> {
-    if (this.lastMessage) this.lastReadMessageIndex = this.lastMessage.index;
+    const participantId = this.resolveOwnParticipantId();
+    if (participantId == null || !this.lastMessage) return 0;
+
+    await RestApi.updateParticipant(this.currentToken, this.chatId, participantId, { last_read_message_id: this.lastMessage.index });
+    this.lastReadMessageIndex = this.lastMessage.index;
+    this.emit("updated", { conversation: this, updateReasons: ["lastReadMessageIndex"] });
     return 0;
   }
 
-  /** In-memory only — see the class-level `lastReadMessageIndex` comment. */
+  /** Persists "nothing read yet" server-side — see setAllMessagesRead's own comment. The
+   * resulting count is re-fetched from the backend (getUnreadMessagesCount), not computed
+   * locally, since only the server actually knows the chat's true total message count. */
   async setAllMessagesUnread(): Promise<number> {
+    const participantId = this.resolveOwnParticipantId();
+    if (participantId == null) {
+      this.lastReadMessageIndex = -1;
+      return 0;
+    }
+
+    await RestApi.updateParticipant(this.currentToken, this.chatId, participantId, { last_read_message_id: null });
     this.lastReadMessageIndex = -1;
-    return this.lastMessage ? this.lastMessage.index + 1 : 0;
+    this.emit("updated", { conversation: this, updateReasons: ["lastReadMessageIndex"] });
+    return (await this.getUnreadMessagesCount()) ?? 0;
   }
 
   /** Matches Twilio's own MessageBuilder entry point — see MessageBuilder's own comment for

@@ -19,6 +19,10 @@ function fakeJwt(payload: Record<string, unknown>): string {
 }
 
 let mediaUploads: Array<{ chat_id: number; participant_id: string; filename: string }> = [];
+// Mocks the real backend's persisted per-participant read state (participants.
+// last_read_message_id) — keyed by participant id, null/absent meaning "hasn't read anything".
+let participantLastRead = new Map<number, number | null>();
+let participantUpdates: Array<{ participantId: number; body: unknown }> = [];
 
 function baseChat(overrides: Partial<RestChat> = {}): RestChat {
   return {
@@ -49,6 +53,8 @@ beforeEach(() => {
   sockets = [];
   sentMessages = [];
   mediaUploads = [];
+  participantLastRead = new Map();
+  participantUpdates = [];
 
   server = Bun.serve({
     port: 0,
@@ -62,13 +68,31 @@ beforeEach(() => {
       if (chatMatch) {
         const chat = chats.get(chatMatch[1]!);
         if (!chat) return new Response("not found", { status: 404 });
-        return Response.json(chat);
+        // Mirrors the real backend: unread_count is computed relative to the chat's own
+        // HUMAN_AGENT participant (there's only ever one across this test file's fixtures) —
+        // null when there isn't one at all, matching "nothing to compute against".
+        const agentParticipant = chat.participants?.find((p) => p.participant_type === "HUMAN_AGENT");
+        const unread_count = agentParticipant
+          ? (chat.chat_messages ?? []).filter((m) => m.id > (participantLastRead.get(agentParticipant.id) ?? 0)).length
+          : null;
+        return Response.json({ ...chat, unread_count });
       }
       const mediaMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages\/(\d+)\/media_url$/);
       if (mediaMatch) return Response.json({ url: `https://cdn.example.com/${mediaMatch[2]}` });
 
       const updateMessageMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages\/(\d+)$/);
       if (updateMessageMatch && req.method === "PUT") return Response.json({ success: true });
+
+      const updateParticipantMatch = url.pathname.match(/^\/web_chats\/(\d+)\/participants\/(\d+)$/);
+      if (updateParticipantMatch && req.method === "PUT") {
+        const body = await req.json();
+        const participantId = Number(updateParticipantMatch[2]);
+        participantUpdates.push({ participantId, body });
+        if (body && typeof body === "object" && "last_read_message_id" in body) {
+          participantLastRead.set(participantId, (body as { last_read_message_id: number | null }).last_read_message_id);
+        }
+        return Response.json({ success: true });
+      }
 
       const sendMediaMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages$/);
       if (sendMediaMatch && req.method === "POST") {
@@ -365,16 +389,67 @@ describe("Client", () => {
     client.shutdown();
   });
 
-  it("Conversation exposes dateCreated/dateUpdated and setAllMessagesUnread's resulting count", async () => {
+  it("Conversation exposes dateCreated/dateUpdated", async () => {
     const client = new Client("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     expect(conversation.dateCreated).toBeInstanceOf(Date);
     expect(conversation.dateUpdated).toBeInstanceOf(Date);
 
-    const unreadCount = await conversation.setAllMessagesUnread();
-    expect(unreadCount).toBe(conversation.lastMessage.index + 1);
+    client.shutdown();
+  });
+
+  it("getUnreadMessagesCount/setAllMessagesRead/setAllMessagesUnread persist read state server-side", async () => {
+    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 })); // matches participant id=11 in baseChat
+    const conversation = await waitFor<any>(client, "conversationJoined");
+
+    // baseChat's one message (id 100) hasn't been read yet — a fresh participant has no
+    // last_read_message_id at all, so it counts as unread (matches the real backend's "everything
+    // unread until proven otherwise" default).
+    expect(await conversation.getUnreadMessagesCount()).toBe(1);
+
+    const readResult = await conversation.setAllMessagesRead();
+    expect(readResult).toBe(0);
+    expect(conversation.lastReadMessageIndex).toBe(100);
+    expect(await conversation.getUnreadMessagesCount()).toBe(0);
+    expect(participantUpdates).toEqual([{ participantId: 11, body: { last_read_message_id: 100 } }]);
+
+    const unreadResult = await conversation.setAllMessagesUnread();
+    expect(unreadResult).toBe(1);
     expect(conversation.lastReadMessageIndex).toBe(-1);
+    expect(await conversation.getUnreadMessagesCount()).toBe(1);
+    expect(participantUpdates[1]).toEqual({ participantId: 11, body: { last_read_message_id: null } });
+
+    client.shutdown();
+  });
+
+  it("setAllMessagesRead/Unread no-op (no network call) when this session has no participant in the chat", async () => {
+    const client = new Client("agent-token"); // not a real JWT — decodes to no agent_id, no participant
+    const conversation = await waitFor<any>(client, "conversationJoined");
+
+    expect(await conversation.setAllMessagesRead()).toBe(0);
+    expect(await conversation.setAllMessagesUnread()).toBe(0);
+    expect(participantUpdates).toEqual([]);
+
+    client.shutdown();
+  });
+
+  it("a customer session resolves its own unread state via the token's own participant_id claim (no agent_id needed)", async () => {
+    chats.set("1", baseChat({
+      participants: [
+        { id: 10, agent_id: null, indentify: "customer_1", name: "Ada", sid: null, conversation_sid: null, chat_id: 1, participant_type: "USER", metadata: {}, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
+      ],
+      chat_messages: [],
+    }));
+    const client = new Client(fakeJwt({ scope: "chat", participant_id: 10 }));
+    const conversation = await waitFor<any>(client, "conversationJoined");
+
+    const result = await conversation.setAllMessagesUnread();
+    expect(result).toBe(0);
+    // The mock server only computes unread_count relative to a HUMAN_AGENT participant, so this
+    // just proves resolveOwnParticipantId() picked participant 10 up from the JWT claim itself
+    // (no HUMAN_AGENT participant exists in this fixture at all) rather than skipping the call.
+    expect(participantUpdates).toEqual([{ participantId: 10, body: { last_read_message_id: null } }]);
 
     client.shutdown();
   });

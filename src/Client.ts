@@ -48,10 +48,17 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   // so Conversation can resolve which participant row is "this agent" for the media-send path,
   // with zero new parameters at any frontend call site.
   private agentId: number | null = null;
+  // A 'chat'-scope (customer) token carries its own participant_id claim directly (unambiguous —
+  // that token is scoped to exactly one chat) — used the same way agentId is, to resolve "who am
+  // I" for setAllMessagesRead/setAllMessagesUnread on the CUSTOMER side (the agent side resolves
+  // via agentId + Conversation's own per-chat participant map instead, since one agent token is
+  // reused across many chats).
+  private ownParticipantId: number | null = null;
 
   constructor(token: string) {
     super();
     this.agentId = this.decodeAgentId(token);
+    this.ownParticipantId = this.decodeParticipantId(token);
     this.transport = this.buildTransport(token);
     this.scheduleExpiryTimers(token);
   }
@@ -59,6 +66,11 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private decodeAgentId(token: string): number | null {
     const payload = decodeJwtPayload(token);
     return typeof payload?.agent_id === "number" ? payload.agent_id : null;
+  }
+
+  private decodeParticipantId(token: string): number | null {
+    const payload = decodeJwtPayload(token);
+    return typeof payload?.participant_id === "number" ? payload.participant_id : null;
   }
 
   private buildTransport(token: string): WsTransport {
@@ -103,7 +115,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   private async joinConversation(chatId: number): Promise<void> {
     if (this.conversationsByChatId.has(chatId)) return;
     const chat = await RestApi.getChat(this.transport.currentToken, chatId);
-    const conversation = new Conversation(chat, this.transport, this.agentId);
+    const conversation = new Conversation(chat, this.transport, this.agentId, this.ownParticipantId);
     conversation.on("updated", (payload) => this.emit("conversationUpdated", payload));
     this.conversationsByChatId.set(chatId, conversation);
     this.emit("conversationJoined", conversation);
@@ -149,7 +161,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       if (conversation.sid === sid) return conversation;
     }
     const chat = await RestApi.getChat(this.transport.currentToken, sid);
-    const conversation = new Conversation(chat, this.transport, this.agentId);
+    const conversation = new Conversation(chat, this.transport, this.agentId, this.ownParticipantId);
     conversation.on("updated", (payload) => this.emit("conversationUpdated", payload));
     this.conversationsByChatId.set(chat.id, conversation);
     return conversation;
@@ -157,6 +169,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
 
   async updateToken(token: string): Promise<void> {
     this.agentId = this.decodeAgentId(token);
+    this.ownParticipantId = this.decodeParticipantId(token);
     this.transport.updateToken(token);
     this.scheduleExpiryTimers(token);
   }

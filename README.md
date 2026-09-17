@@ -98,10 +98,14 @@ deliberate scope decision, documented here so a caller doesn't discover them by 
   rejects with a 422 — that channel's message has already gone out through an external provider
   and can't be retroactively edited there. `message.updateAttributes(attrs)` always works (a
   wholesale merge into the message's metadata), regardless of channel.
-- **No persistent read-tracking.** `lastReadMessageIndex` / `getUnreadMessagesCount()` are
-  in-memory only for the lifetime of the `Conversation` object — there's no backend column to
-  persist "this agent has read up to message N" across reconnects. `getUnreadMessagesCount()`
-  always resolves `null` (the same "compute it yourself" signal Twilio's own SDK can return).
+- **Read-tracking is persisted server-side (2026-09-17).** `setAllMessagesRead()`/
+  `setAllMessagesUnread()` save "the last message this session's own participant has read" on the
+  backend (`participants.last_read_message_id`/`last_read_at`) — it survives a page reload, unlike
+  an earlier v1 that only kept this in memory. `getUnreadMessagesCount()` does a real, always-live
+  fetch (never a locally cached value) and resolves `null` only when the backend has nothing to
+  compute it against — no agent identity on this session, or no participant record in this chat
+  (the same "compute it yourself" signal Twilio's own SDK can return, which
+  `sbx-omnichannel-ui`'s ChatContext already falls back on).
 - **Client-side message pagination.** zavu's `GET /chats/:id` returns a chat's entire message
   history in one response (no cursor pagination exists on the backend). `Conversation.getMessages()`
   fetches that full list once, caches it, and `Paginator` slices the cache in memory. Fine for a
