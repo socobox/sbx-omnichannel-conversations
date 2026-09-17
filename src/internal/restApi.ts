@@ -74,6 +74,7 @@ const paths = {
   webChatMessage: (chatId: number, messageId: number) => `/web_chats/${chatId}/messages/${messageId}`,
   webChatMessageMediaUrl: (chatId: number, messageId: number) => `/web_chats/${chatId}/messages/${messageId}/media_url`,
   webChatMessages: (chatId: number) => `/web_chats/${chatId}/messages`,
+  webChatParticipant: (chatId: number, participantId: number) => `/web_chats/${chatId}/participants/${participantId}`,
 } as const;
 
 async function request<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
@@ -143,7 +144,7 @@ export function updateParticipant(
   participantId: number,
   fields: { last_read_message_id: number | null },
 ): Promise<{ success: true } | { success: false; errors?: Record<string, string[]> }> {
-  return request(token, `/web_chats/${chatId}/participants/${participantId}`, {
+  return request(token, paths.webChatParticipant(chatId, participantId), {
     method: "PUT",
     body: JSON.stringify(fields),
   });
