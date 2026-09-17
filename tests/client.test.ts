@@ -373,7 +373,10 @@ describe("Client", () => {
     expect(conversation.dateUpdated).toBeInstanceOf(Date);
 
     const unreadCount = await conversation.setAllMessagesUnread();
-    expect(unreadCount).toBe(conversation.lastMessage.index + 1);
+    // Since 0.3.0 this is a COUNT of messages, not `lastMessage.index + 1`. Those indexes are
+    // database row ids shared across every chat in the tenant, so the old value was an id with
+    // one added to it, never a quantity. The fixture has a single message, so the answer is 1.
+    expect(unreadCount).toBe(1);
     expect(conversation.lastReadMessageIndex).toBe(-1);
 
     client.shutdown();

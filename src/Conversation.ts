@@ -1,12 +1,16 @@
 import { TypedEventEmitter } from "./EventEmitter.js";
+import { ConversationEvent } from "./events.js";
 import { Message } from "./Message.js";
 import { MessageBuilder } from "./MessageBuilder.js";
 import { Participant } from "./Participant.js";
 import { Paginator } from "./Paginator.js";
 import { RestApi, type RestChat, type RestChatMessage, type RestParticipant } from "./internal/restApi.js";
-import type { ConversationUpdateReason, JSONValue, MessageUpdateReason, SendMessageBody } from "./types.js";
+import { ConversationUpdateReason, MessageUpdateReason, type JSONValue, type SendMessageBody } from "./types.js";
 import type { WsTransport } from "./internal/wsTransport.js";
 
+// Keys stay as string literals, not computed keys off ConversationEvent (src/events.ts), on
+// purpose — tests/contract.test.ts parses this interface as TEXT to freeze the exact event names
+// sbx-omnichannel-ui depends on; a computed key would make that guard stop parsing anything.
 interface ConversationEvents {
   updated: [{ conversation: Conversation; updateReasons: ConversationUpdateReason[] }];
   // Mirrors Twilio's own per-conversation messageAdded/messageUpdated — real, actively-used call
@@ -119,23 +123,23 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     let messageUpdateReasons: MessageUpdateReason[] = [];
     if (reason === "added") {
       this.lastMessage = { index: message.index, dateCreated: message.dateCreated };
-      this.emit("messageAdded", message);
+      this.emit(ConversationEvent.MessageAdded, message);
     } else {
       // Diffed against the PREVIOUSLY cached copy — both a body edit and an attributes/reaction
       // change arrive as the same wire event (message.updated), so this is the only way to tell
       // a caller which one actually happened, matching Twilio's own updateReasons contract.
-      if (previous && previous.body !== message.body) messageUpdateReasons.push("body");
-      if (previous && JSON.stringify(previous.attributes) !== JSON.stringify(message.attributes)) messageUpdateReasons.push("attributes");
-      if (messageUpdateReasons.length === 0) messageUpdateReasons = ["attributes"];
+      if (previous && previous.body !== message.body) messageUpdateReasons.push(MessageUpdateReason.Body);
+      if (previous && JSON.stringify(previous.attributes) !== JSON.stringify(message.attributes)) messageUpdateReasons.push(MessageUpdateReason.Attributes);
+      if (messageUpdateReasons.length === 0) messageUpdateReasons = [MessageUpdateReason.Attributes];
 
       const resolvers = this.pendingMessageUpdates.get(message.index);
       if (resolvers?.length) {
         for (const resolve of resolvers) resolve(message);
         this.pendingMessageUpdates.delete(message.index);
       }
-      this.emit("messageUpdated", { message, updateReasons: messageUpdateReasons });
+      this.emit(ConversationEvent.MessageUpdated, { message, updateReasons: messageUpdateReasons });
     }
-    this.emit("updated", { conversation: this, updateReasons: ["lastMessage"] });
+    this.emit(ConversationEvent.Updated, { conversation: this, updateReasons: [ConversationUpdateReason.LastMessage] });
     return { message, updateReasons: messageUpdateReasons };
   }
 
@@ -150,10 +154,66 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     });
   }
 
+  /**
+   * @internal — re-applies an authoritative `GET /chats/:id` snapshot onto THIS instance instead
+   * of building a new Conversation, so every reference the consumer already holds stays valid:
+   * its React state, its `currentConversationSid` lookups, and the listeners it registered on
+   * this object. Replacing the instance instead would leave the open conversation pointing at an
+   * object nothing updates any more.
+   *
+   * Used on reconnect. While the socket was down no message.new was delivered, so messages,
+   * participants, status and metadata may all have moved on without a single event arriving.
+   */
+  refreshFromRest(raw: RestChat): void {
+    const updateReasons: ConversationUpdateReason[] = [];
+
+    const nextAttributes = (raw.metadata ?? {}) as JSONValue;
+    if (JSON.stringify(this.attributes) !== JSON.stringify(nextAttributes)) {
+      this.attributes = nextAttributes;
+      updateReasons.push(ConversationUpdateReason.Attributes);
+    }
+    if (this.status !== raw.status) {
+      this.status = raw.status;
+      updateReasons.push(ConversationUpdateReason.Status);
+    }
+
+    this.ingestParticipants(raw.participants ?? []);
+
+    if (raw.chat_messages?.length) {
+      const previousLastRead = this.lastReadMessageIndex;
+      const previousLastIndex = this.lastMessage?.index ?? null;
+      const knownIndexes = new Set((this.cachedMessages ?? []).map((m) => m.index));
+      this.setMessagesFromRest(raw.chat_messages);
+      // setMessagesFromRest marks everything read, which is right for a FIRST hydration and
+      // wrong for a refresh: it would silently clear the unread state for every message that
+      // landed while the socket was down. Read state is in-memory only, so the pre-refresh
+      // value is the only truth there is.
+      this.lastReadMessageIndex = previousLastRead;
+      if (this.lastMessage && this.lastMessage.index !== previousLastIndex) {
+        updateReasons.push(ConversationUpdateReason.LastMessage);
+      }
+
+      // Recovering the messages into the cache is only half the job. A consumer that renders an
+      // open chat reads the history once and then appends from `messageAdded` — nothing re-reads
+      // the cache — so without these the recovered messages sit in memory and never reach the
+      // screen. Emitting them makes a reconnect look like what it is: those messages arriving.
+      //
+      // Deliberately ONLY the per-conversation event, never Client's aggregated one. Client's
+      // feed is what drives notifications, and replaying it after a five-minute outage would
+      // fire a toast per recovered message. Unread badges have an exact source now —
+      // getUnreadMessagesCount() — and do not need to be rebuilt from a replayed stream.
+      for (const message of this.cachedMessages ?? []) {
+        if (!knownIndexes.has(message.index)) this.emit(ConversationEvent.MessageAdded, message);
+      }
+    }
+
+    if (updateReasons.length) this.emit(ConversationEvent.Updated, { conversation: this, updateReasons });
+  }
+
   /** @internal */
   applyAttributesUpdate(attributes: JSONValue): void {
     this.attributes = attributes;
-    this.emit("updated", { conversation: this, updateReasons: ["attributes"] });
+    this.emit(ConversationEvent.Updated, { conversation: this, updateReasons: [ConversationUpdateReason.Attributes] });
   }
 
   private async ensureMessagesLoaded(): Promise<Message[]> {
@@ -181,26 +241,56 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   }
 
   /**
-   * No backend read-tracking exists yet (see the class-level `lastReadMessageIndex` comment) —
-   * always resolves `null`, the same "I don't know, compute it yourself" signal Twilio's own SDK
-   * can return, which `sbx-omnichannel-ui`'s ChatContext already falls back on
-   * (`lastMessageIndex - lastReadIndex`) for exactly this case.
+   * Twilio's contract: `null` means "I genuinely don't know", a number is an exact count.
+   *
+   * Until 0.3.0 this always returned `null`, on the grounds that nothing persists reads
+   * server-side. That is still true across reloads (see the class-level `lastReadMessageIndex`
+   * comment), but it conflated "not persisted" with "unknowable": for the lifetime of this
+   * object the cached history plus the last index marked read IS an exact answer.
+   *
+   * Returning it matters because the alternative a caller is left with — subtracting
+   * `lastMessage.index - lastReadMessageIndex` — does NOT count messages. Those are database
+   * row ids shared across every chat in the tenant (see Message#index), so the difference
+   * between two of them is an arbitrary number, not a quantity of messages. It only ever looked
+   * correct because both sides happened to be equal, making it zero.
+   *
+   * Still `null` when no history has been loaded yet: that really is unknown.
    */
   async getUnreadMessagesCount(): Promise<number | null> {
-    return null;
+    const messages = this.cachedMessages;
+    if (!messages) return null;
+    const lastRead = this.lastReadMessageIndex;
+    if (lastRead == null) return messages.length;
+    return messages.filter((message) => message.index > lastRead).length;
   }
 
-  /** In-memory only — see the class-level `lastReadMessageIndex` comment. Matches Twilio's own
-   * return contract (resulting unread count) even though nothing is actually persisted. */
+  /**
+   * In-memory only — see the class-level `lastReadMessageIndex` comment. Matches Twilio's own
+   * return contract (the resulting unread count) even though nothing is persisted.
+   *
+   * Emits `updated` with a `lastReadMessageIndex` reason, which is how Twilio tells a UI to
+   * clear its unread badge. Before 0.3.0 nothing was emitted here at all, so a consumer that
+   * had written that handler (sbx-omnichannel-ui has one) could never see it fire, and its
+   * badge kept whatever count it had until the next full page load.
+   */
   async setAllMessagesRead(): Promise<number> {
     if (this.lastMessage) this.lastReadMessageIndex = this.lastMessage.index;
+    this.emitReadStateChanged();
     return 0;
   }
 
   /** In-memory only — see the class-level `lastReadMessageIndex` comment. */
   async setAllMessagesUnread(): Promise<number> {
     this.lastReadMessageIndex = -1;
-    return this.lastMessage ? this.lastMessage.index + 1 : 0;
+    this.emitReadStateChanged();
+    return (await this.getUnreadMessagesCount()) ?? 0;
+  }
+
+  private emitReadStateChanged(): void {
+    this.emit(ConversationEvent.Updated, {
+      conversation: this,
+      updateReasons: [ConversationUpdateReason.LastReadMessageIndex],
+    });
   }
 
   /** Matches Twilio's own MessageBuilder entry point — see MessageBuilder's own comment for
@@ -221,7 +311,9 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   async sendMessage(body: SendMessageBody, attributes?: JSONValue): Promise<number> {
     if (typeof body === "string") {
       void attributes;
-      return await this.transport.sendMessage(this.chatId, body);
+      // El id del participante propio deja que el transporte reconozca SU eco: dos lados de un
+      // chat mandan el mismo texto corto ("ok", "gracias") a la vez con toda normalidad.
+      return await this.transport.sendMessage(this.chatId, body, this.resolveOwnParticipantId());
     }
     const participantId = this.resolveOwnParticipantId();
     if (participantId == null) {

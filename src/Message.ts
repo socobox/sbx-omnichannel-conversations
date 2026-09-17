@@ -9,7 +9,11 @@ export interface MessageReaction {
   updated_at: string;
 }
 
-export type MessageType = "text" | "media";
+export const MessageType = {
+  Text: "text",
+  Media: "media",
+} as const;
+export type MessageType = (typeof MessageType)[keyof typeof MessageType];
 
 // Mirrors @twilio/conversations' own `Message`. `index` has no direct zavu equivalent (Twilio's
 // own index is a per-conversation sequence starting at 0); the message's own database id is used
@@ -55,7 +59,7 @@ export class Message {
           }),
         ]
       : null;
-    this.type = this.attachedMedia?.length ? "media" : "text";
+    this.type = this.attachedMedia?.length ? MessageType.Media : MessageType.Text;
     this.media = this.attachedMedia?.[0] ?? null;
   }
 
