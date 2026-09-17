@@ -62,6 +62,16 @@ export interface RestChat {
   participants?: RestParticipant[];
 }
 
+const paths = {
+  // `chatId` puede ser un string arbitrario: getConversationBySid lo pasa tal cual, y ese
+  // endpoint resuelve por id numérico, conversation_sid O custom_id (ver Client#getConversationBySid).
+  // Un custom_id con "/", "?" o "#" produciría una URL distinta de la pedida sin encodear.
+  chat: (chatId: number | string) => `/chats/${encodeURIComponent(String(chatId))}`,
+  webChatMessage: (chatId: number, messageId: number) => `/web_chats/${chatId}/messages/${messageId}`,
+  webChatMessageMediaUrl: (chatId: number, messageId: number) => `/web_chats/${chatId}/messages/${messageId}/media_url`,
+  webChatMessages: (chatId: number) => `/web_chats/${chatId}/messages`,
+} as const;
+
 async function request<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
   const { apiBaseUrl } = getConfig();
   const res = await fetch(`${apiBaseUrl}${path}`, {
@@ -97,7 +107,7 @@ async function requestForm<T>(token: string, path: string, form: FormData): Prom
 }
 
 export function getChat(token: string, chatId: number | string): Promise<RestChat> {
-  return request<RestChat>(token, `/chats/${chatId}`);
+  return request<RestChat>(token, paths.chat(chatId));
 }
 
 // `body` is a genuinely new capability (see this package's README) — persisted body edits only
@@ -109,14 +119,14 @@ export function updateMessage(
   messageId: number,
   fields: { metadata?: JSONValue; body?: string },
 ): Promise<{ success: true }> {
-  return request(token, `/web_chats/${chatId}/messages/${messageId}`, {
+  return request(token, paths.webChatMessage(chatId, messageId), {
     method: "PUT",
     body: JSON.stringify(fields),
   });
 }
 
 export function getMessageMediaUrl(token: string, chatId: number, messageId: number): Promise<{ url: string | null }> {
-  return request(token, `/web_chats/${chatId}/messages/${messageId}/media_url`);
+  return request(token, paths.webChatMessageMediaUrl(chatId, messageId));
 }
 
 // Genuinely new capability (see this package's README) — proxies an agent's outbound attachment
@@ -139,7 +149,7 @@ export function sendMedia(
   form.append("file", filePart, filename ?? "attachment");
   form.append("participant_id", String(participantId));
   if (body) form.append("body", body);
-  return requestForm<RestChatMessage>(token, `/web_chats/${chatId}/messages`, form);
+  return requestForm<RestChatMessage>(token, paths.webChatMessages(chatId), form);
 }
 
 export const RestApi = { getChat, updateMessage, getMessageMediaUrl, sendMedia };
