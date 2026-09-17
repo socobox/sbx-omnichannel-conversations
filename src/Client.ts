@@ -365,7 +365,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       if (conversation.sid === sid) return conversation;
     }
     const chat = await RestApi.getChat(this.transport.currentToken, sid);
-    const conversation = new Conversation(chat, this.transport, this.agentId);
+    const conversation = new Conversation(chat, this.transport, this.agentId, this.ownParticipantId);
     conversation.on(ConversationEvent.Updated, (payload) => this.emit(ClientEvent.ConversationUpdated, payload));
     this.conversationsByChatId.set(chat.id, conversation);
     return conversation;
