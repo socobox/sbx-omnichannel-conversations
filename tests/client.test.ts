@@ -454,6 +454,34 @@ describe("Client", () => {
     client.shutdown();
   });
 
+  it("getConversationBySid conserva el participant_id del token, igual que conversationJoined", async () => {
+    // El merge con main perdió el 4to argumento SOLO en este camino (Client.ts, dentro de
+    // getConversationBySid) — una sesión de cliente que resolviera su chat por sid en vez de
+    // recibirlo por conversationJoined quedaba sin participante, y sus marcados de leído
+    // no-opeaban en silencio para siempre: sin error, sin petición, sin nada que mirar.
+    // Dos keys para el mismo chat: la búsqueda inicial por sid usa "CH9" (RestApi.getChat con el
+    // string que se le pasa a getConversationBySid), pero cualquier fetch posterior de ESE
+    // Conversation (ensureMessagesLoaded, getUnreadMessagesCount) usa `chatId` — el id numérico.
+    const chat9 = baseChat({
+      id: 9, conversation_sid: "CH9",
+      participants: [
+        { id: 10, agent_id: null, indentify: "customer_1", name: "Ada", sid: null, conversation_sid: null, chat_id: 9, participant_type: "USER", metadata: {}, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
+      ],
+      chat_messages: [],
+    });
+    chats.set("CH9", chat9);
+    chats.set("9", chat9);
+
+    const client = new Client(fakeJwt({ scope: "chat", participant_id: 10 }));
+    await waitFor<any>(client, "conversationJoined");
+
+    const conversation = await client.getConversationBySid("CH9");
+    await conversation.setAllMessagesUnread();
+
+    expect(participantUpdates).toContainEqual({ participantId: 10, body: { last_read_message_id: null } });
+    client.shutdown();
+  });
+
   it("Conversation itself emits messageAdded/messageUpdated, mirroring Client's aggregated feed", async () => {
     const client = new Client("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
