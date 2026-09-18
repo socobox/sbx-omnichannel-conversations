@@ -176,3 +176,27 @@ bun install
 bun run build   # tsc -> lib/
 bun test        # tests/
 ```
+
+## Releasing
+
+Publishing to npm is automatic — bump `version` in `package.json` and push to `main`.
+`.github/workflows/publish.yml` runs on every push that touches `package.json`:
+
+1. Builds and runs the full test suite (a failure here blocks the publish).
+2. If that exact version is already on npm, does nothing — a `package.json` push that didn't
+   actually change the version (a dependency bump, a formatting fix) is a safe no-op.
+3. Otherwise publishes with `--provenance --access public`, picking the npm
+   [dist-tag](https://docs.npmjs.com/cli/v10/commands/npm-dist-tag) automatically from the version
+   string: a **prerelease** (anything with a `-`, e.g. `0.3.0-beta.0`, `1.0.0-rc.1`) publishes
+   under its own prerelease identifier (`beta`, `rc`, ...) — never `latest` — so an unpinned
+   `npm install sbx-omnichannel-conversations` can never silently pick up a beta. A plain version
+   (`1.2.3`) publishes as `latest`, npm's own default.
+4. Creates a matching GitHub Release (`vX.Y.Z`, marked pre-release when the version is one),
+   with auto-generated release notes.
+
+To install a prerelease deliberately: `npm install sbx-omnichannel-conversations@beta` (or the
+exact version). To (re-)publish a version by hand — e.g. one merged before this workflow
+existed — run it manually via `gh workflow run publish.yml` (or the *Run workflow* button on the
+Actions tab); it uses whatever version is currently in `package.json` on `main`.
+
+Requires the `NPM_TOKEN` repo secret (an npm token with publish access).
