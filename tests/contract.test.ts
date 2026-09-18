@@ -19,6 +19,16 @@ import type { RestChat, RestChatMessage, RestParticipant } from "../src/internal
 let server: ReturnType<typeof Bun.serve>;
 let chats = new Map<string, RestChat>();
 let sockets: Array<{ send: (data: string) => void; close: () => void }> = [];
+// See client.test.ts's own comment on this exact pattern: configure() is process-global, shared
+// across every test FILE in the same `bun test` run, so a client a failing assertion leaves alive
+// (before its own client.shutdown() line runs) can reconnect later against a DIFFERENT file's
+// mock server once THAT file's beforeEach repoints apiBaseUrl.
+let clients: Client[] = [];
+function newClient(token: string): Client {
+  const client = new Client(token);
+  clients.push(client);
+  return client;
+}
 
 function msg(overrides: Partial<RestChatMessage> = {}): RestChatMessage {
   return {
@@ -51,6 +61,7 @@ function baseChat(overrides: Partial<RestChat> = {}): RestChat {
 }
 
 beforeEach(() => {
+  clients = [];
   chats = new Map([["1", baseChat()]]);
   sockets = [];
   server = Bun.serve({
@@ -77,6 +88,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const client of clients) {
+    try { client.shutdown(); } catch { /* already shut down by the test itself */ }
+  }
+  clients = [];
   server.stop(true);
 });
 
@@ -100,7 +115,7 @@ function interfaceKeys(src: string, name: string): string[] {
 
 describe("contrato público — valores de los que depende sbx-omnichannel-ui", () => {
   it("Message.index es el id de base de datos, no una posición en el array", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     const { items } = await conversation.getMessages();
 
@@ -124,7 +139,7 @@ describe("contrato público — valores de los que depende sbx-omnichannel-ui", 
   });
 
   it("Conversation.sid usa conversation_sid, con el id numérico como respaldo", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     expect(conversation.sid).toBe("CH1");
     client.shutdown();
@@ -132,14 +147,14 @@ describe("contrato público — valores de los que depende sbx-omnichannel-ui", 
     // El respaldo importa: hay 165 usos de .sid en el consumidor, y un undefined ahí
     // rompe el keying de toda la lista de chats.
     chats.set("1", baseChat({ conversation_sid: null }));
-    const client2 = new Client("agent-token");
+    const client2 = newClient("agent-token");
     const conversation2 = await waitFor<any>(client2, "conversationJoined");
     expect(conversation2.sid).toBe("1");
     client2.shutdown();
   });
 
   it("Message.attributes expone reactions como hermano de metadata, no anidado", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     const { items } = await conversation.getMessages();
 

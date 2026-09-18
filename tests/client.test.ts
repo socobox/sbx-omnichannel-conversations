@@ -19,6 +19,18 @@ function fakeJwt(payload: Record<string, unknown>): string {
 }
 
 let mediaUploads: Array<{ chat_id: number; participant_id: string; filename: string }> = [];
+// Every Client built in this file, so afterEach can force-shutdown any that a failing test left
+// alive before reaching its own client.shutdown() line. configure() is process-global state
+// shared across every test FILE in the same `bun test` run (not just this one) — a client leaked
+// here can reconnect later against a DIFFERENT file's mock server once that file's own beforeEach
+// repoints apiBaseUrl, inflating ITS counters. Same pattern as transport.test.ts/readiness.test.ts/
+// unread.test.ts; this file (and contract.test.ts) predated that pattern and never adopted it.
+let clients: Client[] = [];
+function newClient(token: string): Client {
+  const client = new Client(token);
+  clients.push(client);
+  return client;
+}
 // Mocks the real backend's persisted per-participant read state (participants.
 // last_read_message_id) — keyed by participant id, null/absent meaning "hasn't read anything".
 let participantLastRead = new Map<number, number | null>();
@@ -49,6 +61,7 @@ function baseChat(overrides: Partial<RestChat> = {}): RestChat {
 }
 
 beforeEach(() => {
+  clients = [];
   chats = new Map([["1", baseChat()]]);
   sockets = [];
   sentMessages = [];
@@ -127,6 +140,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const client of clients) {
+    try { client.shutdown(); } catch { /* already shut down by the test itself */ }
+  }
+  clients = [];
   server.stop(true);
 });
 
@@ -141,7 +158,7 @@ function waitFor<T>(emitter: { once: (event: string, cb: (arg: T) => void) => vo
 
 describe("Client", () => {
   it("hydrates already-subscribed conversations on connect, mirroring conversationJoined", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     expect(conversation.sid).toBe("CH1");
@@ -153,7 +170,7 @@ describe("Client", () => {
   });
 
   it("surfaces an inbound message.new as messageAdded on the right conversation", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
 
     const newMessage: RestChatMessage = {
@@ -176,7 +193,7 @@ describe("Client", () => {
   });
 
   it("resolves a top-level `reactions` field into message.attributes.reactions", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
 
     const updated: RestChatMessage = {
@@ -196,7 +213,7 @@ describe("Client", () => {
   });
 
   it("treats chat.finished as conversationRemoved, keyed by the event's own chat_id", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
 
     const removedPromise = waitFor<any>(client, "conversationRemoved");
@@ -212,7 +229,7 @@ describe("Client", () => {
   it("joins a brand-new conversation on chat.assigned, mirroring conversationJoined for a chat not seen at connect time", async () => {
     chats.set("2", baseChat({ id: 2, conversation_sid: "CH2", chat_messages: [], participants: [] }));
 
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     await waitFor(client, "conversationJoined"); // chat 1, from connected's subscribed_chat_ids
 
     const joinedPromise = waitFor<any>(client, "conversationJoined");
@@ -226,7 +243,7 @@ describe("Client", () => {
   });
 
   it("sendMessage resolves with the real message id once the message.new echo arrives", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
@@ -248,7 +265,7 @@ describe("Client", () => {
   });
 
   it("rejects sendMessage with media when this agent has no participant record in this chat", async () => {
-    const client = new Client("agent-token"); // not a real JWT — decodes to no agent_id at all
+    const client = newClient("agent-token"); // not a real JWT — decodes to no agent_id at all
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
@@ -260,7 +277,7 @@ describe("Client", () => {
   });
 
   it("sendMessage with media uploads via POST .../messages and resolves with the created message's id", async () => {
-    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 })); // matches participant id=11 in baseChat
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 })); // matches participant id=11 in baseChat
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
@@ -274,7 +291,7 @@ describe("Client", () => {
   });
 
   it("Message#updateBody persists the edit and resolves once the message.updated echo arrives", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     const page = await conversation.getMessages();
     const message = page.items[0]!;
@@ -297,7 +314,7 @@ describe("Client", () => {
   });
 
   it("messageUpdated reports updateReasons: ['body'] for a body-only edit vs ['attributes'] for metadata/reactions", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
 
     const bodyEditPromise = waitFor<any>(client, "messageUpdated");
@@ -335,7 +352,7 @@ describe("Client", () => {
       })),
     }));
 
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     const page = await conversation.getMessages(2);
@@ -358,7 +375,7 @@ describe("Client", () => {
       }],
     }));
 
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     const page = await conversation.getMessages();
     const message = page.items[0]!;
@@ -377,7 +394,7 @@ describe("Client", () => {
         { id: 301, sid: "IM301", body: null, media: "key.png", media_type: "image/png", metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
       ],
     }));
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     const page = await conversation.getMessages();
 
@@ -390,7 +407,7 @@ describe("Client", () => {
   });
 
   it("Conversation exposes dateCreated/dateUpdated", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     expect(conversation.dateCreated).toBeInstanceOf(Date);
@@ -400,7 +417,7 @@ describe("Client", () => {
   });
 
   it("getUnreadMessagesCount/setAllMessagesRead/setAllMessagesUnread persist read state server-side", async () => {
-    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 })); // matches participant id=11 in baseChat
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 })); // matches participant id=11 in baseChat
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     // baseChat's one message (id 100) hasn't been read yet — a fresh participant has no
@@ -424,7 +441,7 @@ describe("Client", () => {
   });
 
   it("setAllMessagesRead/Unread no-op (no network call) when this session has no participant in the chat", async () => {
-    const client = new Client("agent-token"); // not a real JWT — decodes to no agent_id, no participant
+    const client = newClient("agent-token"); // not a real JWT — decodes to no agent_id, no participant
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     expect(await conversation.setAllMessagesRead()).toBe(0);
@@ -441,7 +458,7 @@ describe("Client", () => {
       ],
       chat_messages: [],
     }));
-    const client = new Client(fakeJwt({ scope: "chat", participant_id: 10 }));
+    const client = newClient(fakeJwt({ scope: "chat", participant_id: 10 }));
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     const result = await conversation.setAllMessagesUnread();
@@ -472,7 +489,7 @@ describe("Client", () => {
     chats.set("CH9", chat9);
     chats.set("9", chat9);
 
-    const client = new Client(fakeJwt({ scope: "chat", participant_id: 10 }));
+    const client = newClient(fakeJwt({ scope: "chat", participant_id: 10 }));
     await waitFor<any>(client, "conversationJoined");
 
     const conversation = await client.getConversationBySid("CH9");
@@ -483,7 +500,7 @@ describe("Client", () => {
   });
 
   it("Conversation itself emits messageAdded/messageUpdated, mirroring Client's aggregated feed", async () => {
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
 
     const addedPromise = waitFor<any>(conversation, "messageAdded");
@@ -514,7 +531,7 @@ describe("Client", () => {
   });
 
   it("prepareMessage()/MessageBuilder sends a single-attachment message via the same media upload path", async () => {
-    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 }));
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 }));
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
@@ -531,7 +548,7 @@ describe("Client", () => {
   });
 
   it("MessageBuilder rejects more than one attachment per message, clearly", async () => {
-    const client = new Client(fakeJwt({ scope: "agent", agent_id: 99 }));
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 }));
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
@@ -550,7 +567,7 @@ describe("Client", () => {
         { id: 20, agent_id: null, indentify: "+15550001111", name: "Ada", sid: null, conversation_sid: null, chat_id: 1, participant_type: "USER", metadata: { whatsapp: { address: "+15550001111" } }, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
       ],
     }));
-    const client = new Client("agent-token");
+    const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
     const participants = await conversation.getParticipants();
 
