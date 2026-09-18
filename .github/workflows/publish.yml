@@ -1,14 +1,21 @@
 name: Publish to npm
 
+# Runs on every push to main that touches package.json, and can also be fired by hand
+# (workflow_dispatch) — e.g. to publish a version that was merged before this automation existed.
+# Idempotent: if package.json's version is already on npm, the publish/release steps are skipped
+# rather than failing, so an unrelated push that happens to touch package.json (formatting, a
+# dependency bump with no version change) is a safe no-op.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths: ["package.json"]
+  workflow_dispatch: {}
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +29,42 @@ jobs:
       - run: bun install
       - run: bun run build
       - run: bun test
-      - run: npm publish --provenance --access public
+
+      # A prerelease version (anything with a "-", e.g. 0.3.0-beta.0) publishes under its own
+      # prerelease identifier as the npm dist-tag (0.3.0-beta.0 -> "beta", 1.0.0-rc.1 -> "rc")
+      # instead of "latest" — `npm install` (unpinned) must never silently pick up a beta. A
+      # plain version (1.2.3) publishes as "latest", npm's own default when --tag is omitted.
+      - name: Check version and determine dist-tag
+        id: check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "sbx-omnichannel-conversations@$VERSION" version >/dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            echo "tag=$(echo "$VERSION" | sed -E 's/^[^-]+-([A-Za-z]+).*/\1/')" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.already_published == 'false'
+        run: npm publish --provenance --access public --tag "${{ steps.check.outputs.tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.already_published == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS=(--title "v${{ steps.check.outputs.version }}" --generate-notes)
+          if [[ "${{ steps.check.outputs.prerelease }}" == "true" ]]; then
+            ARGS+=(--prerelease)
+          fi
+          gh release create "v${{ steps.check.outputs.version }}" "${ARGS[@]}"
