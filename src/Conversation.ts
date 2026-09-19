@@ -7,6 +7,24 @@ import { Paginator } from "./Paginator.js";
 import { RestApi, type RestChat, type RestChatMessage, type RestParticipant } from "./internal/restApi.js";
 import { ConversationUpdateReason, MessageUpdateReason, type JSONValue, type SendMessageBody } from "./types.js";
 import type { WsTransport } from "./internal/wsTransport.js";
+import { MessageUpdateTimeoutError } from "./ConnectionError.js";
+
+/** No synchronous ack exists for a message update either (same reasoning as
+ * internal/wsTransport.ts's own SEND_ACK_TIMEOUT_MS) — this is the backstop for "REST write
+ * succeeded, but the `message.updated` echo that's supposed to confirm it never arrived". Report:
+ * a `body` update immediately followed by an `attributes` update on the SAME message could leave
+ * the second echo un-emitted by zavu (see web_chat.repo.ts#updateMessage) — that's the root cause
+ * under investigation server-side; this is the client-side backstop regardless of the cause,
+ * since a caller must never be left with a promise that neither resolves nor rejects. Kept well
+ * under sendMessage's own 30s: a message update is a smaller, already-persisted write, and the
+ * report suggested 10-15s specifically to keep an editing UI from looking frozen that long. */
+export const DEFAULT_MESSAGE_UPDATE_TIMEOUT_MS = 12_000;
+
+interface PendingMessageUpdate {
+  readonly resolve: (message: Message) => void;
+  readonly reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+}
 
 // Keys stay as string literals, not computed keys off ConversationEvent (src/events.ts), on
 // purpose — tests/contract.test.ts parses this interface as TEXT to freeze the exact event names
@@ -57,14 +75,23 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   private cachedMessages: Message[] | null = null;
   private participantIdentities = new Map<number, string>();
   private participantIdByAgentId = new Map<number, number>();
-  private pendingMessageUpdates = new Map<number, Array<(message: Message) => void>>();
+  private pendingMessageUpdates = new Map<number, PendingMessageUpdate[]>();
+  /** @internal — per-instance so tests can use a short value instead of waiting out the real
+   * default; see the constructor param and DEFAULT_MESSAGE_UPDATE_TIMEOUT_MS above. */
+  private readonly messageUpdateTimeoutMs: number;
   // Ver applyUnreadCount()/getUnreadMessagesCount() más abajo — el último conteo que dio el
   // SERVIDOR, y si algo pasó desde entonces que pudiera haberlo movido.
   private lastKnownUnreadCount: number | null = null;
   private unreadCountIsFresh = false;
 
   /** @internal */
-  constructor(raw: RestChat, transport: WsTransport, agentId: number | null = null, ownParticipantIdFromToken: number | null = null) {
+  constructor(
+    raw: RestChat,
+    transport: WsTransport,
+    agentId: number | null = null,
+    ownParticipantIdFromToken: number | null = null,
+    messageUpdateTimeoutMs?: number,
+  ) {
     super();
     this.chatId = raw.id;
     this.sid = raw.conversation_sid ?? String(raw.id);
@@ -76,6 +103,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     this.transport = transport;
     this.agentId = agentId;
     this.ownParticipantIdFromToken = ownParticipantIdFromToken;
+    this.messageUpdateTimeoutMs = messageUpdateTimeoutMs ?? DEFAULT_MESSAGE_UPDATE_TIMEOUT_MS;
     this.ingestParticipants(raw.participants ?? []);
     if (raw.chat_messages?.length) {
       this.setMessagesFromRest(raw.chat_messages, raw.unread_count ?? null);
@@ -188,26 +216,74 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
       if (previous && JSON.stringify(previous.attributes) !== JSON.stringify(message.attributes)) messageUpdateReasons.push(MessageUpdateReason.Attributes);
       if (messageUpdateReasons.length === 0) messageUpdateReasons = [MessageUpdateReason.Attributes];
 
-      const resolvers = this.pendingMessageUpdates.get(message.index);
-      if (resolvers?.length) {
-        for (const resolve of resolvers) resolve(message);
-        this.pendingMessageUpdates.delete(message.index);
-      }
+      this.settleMessageUpdate(message.index, message);
       this.emit(ConversationEvent.MessageUpdated, { message, updateReasons: messageUpdateReasons });
     }
     this.emit(ConversationEvent.Updated, { conversation: this, updateReasons: [ConversationUpdateReason.LastMessage] });
     return { message, updateReasons: messageUpdateReasons };
   }
 
-  /** @internal — used by Message#updateBody/updateAttributes to resolve once the corresponding
-   * message.updated echo round-trips back over the socket (there's no synchronous ack, same
-   * reasoning as Conversation#sendMessage's own pendingSends). */
-  awaitMessageUpdate(index: number): Promise<Message> {
-    return new Promise((resolve) => {
+  /**
+   * Resolves the oldest pending update for this index — and ONLY that one (FIFO). One
+   * `message.updated` echo confirms one write; resolving every waiter on a single echo would
+   * falsely complete a second in-flight updateBody/updateAttributes on the same index.
+   */
+  private settleMessageUpdate(index: number, message: Message): void {
+    const list = this.pendingMessageUpdates.get(index);
+    if (!list?.length) return;
+    const pending = list.shift()!;
+    if (list.length === 0) this.pendingMessageUpdates.delete(index);
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.resolve(message);
+  }
+
+  private discardPendingMessageUpdate(index: number, pending: PendingMessageUpdate): void {
+    const list = this.pendingMessageUpdates.get(index);
+    if (!list) return;
+    const at = list.indexOf(pending);
+    if (at < 0) return;
+    list.splice(at, 1);
+    if (list.length === 0) this.pendingMessageUpdates.delete(index);
+    if (pending.timer) clearTimeout(pending.timer);
+  }
+
+  /**
+   * @internal — used by Message#updateBody/updateAttributes. Registers the waiter BEFORE the
+   * REST write returns so a fast WS echo cannot arrive in the gap and leave the promise hanging
+   * (same "register before send" pattern as WsTransport#sendMessage). `cancel` drops the waiter
+   * if the REST call itself fails, so a 422 does not also fire MessageUpdateTimeoutError later.
+   */
+  beginMessageUpdate(index: number): { promise: Promise<Message>; cancel: (error: Error) => void } {
+    let pending!: PendingMessageUpdate;
+    const promise = new Promise<Message>((resolve, reject) => {
+      pending = { resolve, reject, timer: null };
+      pending.timer = setTimeout(() => {
+        this.discardPendingMessageUpdate(index, pending);
+        reject(
+          new MessageUpdateTimeoutError(
+            `sbx-omnichannel-conversations: timed out after ${this.messageUpdateTimeoutMs}ms waiting for the server to echo this message update back`,
+          ),
+        );
+      }, this.messageUpdateTimeoutMs);
       const list = this.pendingMessageUpdates.get(index) ?? [];
-      list.push(resolve);
+      list.push(pending);
       this.pendingMessageUpdates.set(index, list);
     });
+    return {
+      promise,
+      cancel: (error: Error) => {
+        // Only reject if we still own this waiter — settleMessageUpdate may have already won.
+        const list = this.pendingMessageUpdates.get(index);
+        if (!list || !list.includes(pending)) return;
+        this.discardPendingMessageUpdate(index, pending);
+        pending.reject(error);
+      },
+    };
+  }
+
+  /** @internal — thin wrapper kept for any call site that only needs the promise. */
+  awaitMessageUpdate(index: number): Promise<Message> {
+    return this.beginMessageUpdate(index).promise;
   }
 
   /**

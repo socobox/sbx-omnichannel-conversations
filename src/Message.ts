@@ -70,14 +70,30 @@ export class Message {
    * here as a rejected Promise, same as any other REST failure.
    */
   async updateBody(body: string): Promise<Message> {
-    await RestApi.updateMessage(this.conversation.currentToken, this.conversation.chatId, this.index, { body });
-    return this.conversation.awaitMessageUpdate(this.index);
+    // Register the WS-echo waiter BEFORE the REST write returns — otherwise a fast
+    // `message.updated` can arrive in the gap and leave this promise pending forever (the same
+    // class of hang report1.md hit on a body→attributes sequence when the second echo never
+    // came; registering first also closes the early-echo race for a single write).
+    const wait = this.conversation.beginMessageUpdate(this.index);
+    try {
+      await RestApi.updateMessage(this.conversation.currentToken, this.conversation.chatId, this.index, { body });
+    } catch (error) {
+      wait.cancel(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    return wait.promise;
   }
 
   /** Matches Twilio's own updateAttributes — a wholesale merge server-side (see
    * web_chat.repo.ts#updateMessage's own comment: MERGES into existing metadata, not a replace). */
   async updateAttributes(attributes: JSONValue): Promise<Message> {
-    await RestApi.updateMessage(this.conversation.currentToken, this.conversation.chatId, this.index, { metadata: attributes });
-    return this.conversation.awaitMessageUpdate(this.index);
+    const wait = this.conversation.beginMessageUpdate(this.index);
+    try {
+      await RestApi.updateMessage(this.conversation.currentToken, this.conversation.chatId, this.index, { metadata: attributes });
+    } catch (error) {
+      wait.cancel(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    return wait.promise;
   }
 }

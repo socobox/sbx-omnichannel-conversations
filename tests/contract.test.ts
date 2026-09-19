@@ -229,7 +229,8 @@ describe("contrato público — valores de los que depende sbx-omnichannel-ui", 
     const pkg = await import("../src/index.ts");
     // Clases y funciones.
     for (const name of ["configure", "Client", "Conversation", "Message", "MessageBuilder",
-                        "Participant", "Media", "Paginator", "ConnectionError", "SendTimeoutError"]) {
+                        "Participant", "Media", "Paginator", "ConnectionError", "SendTimeoutError",
+                        "MessageUpdateTimeoutError"]) {
       expect(typeof (pkg as any)[name]).toBe("function");
     }
     // Catálogos: desde A2b existen en RUNTIME, no solo como tipos. El consumidor los importa
@@ -250,7 +251,7 @@ describe("contrato público — valores de los que depende sbx-omnichannel-ui", 
 
 describe("ConnectionError", () => {
   it("sobrevive como instanceof y expone el payload de Twilio", async () => {
-    const { ConnectionError, SendTimeoutError } = await import("../src/ConnectionError.ts");
+    const { ConnectionError, SendTimeoutError, MessageUpdateTimeoutError } = await import("../src/ConnectionError.ts");
 
     const err = new ConnectionError("el servidor rechazó el token", { terminal: true, errorCode: 1008 });
     expect(err).toBeInstanceOf(Error);
@@ -267,5 +268,11 @@ describe("ConnectionError", () => {
     expect(timeout).toBeInstanceOf(SendTimeoutError);
     expect(timeout.name).toBe("SendTimeoutError");
     expect(timeout.terminal).toBe(false);
+
+    const updateTimeout = new MessageUpdateTimeoutError("sin eco de update");
+    expect(updateTimeout).toBeInstanceOf(ConnectionError);
+    expect(updateTimeout).toBeInstanceOf(MessageUpdateTimeoutError);
+    expect(updateTimeout.name).toBe("MessageUpdateTimeoutError");
+    expect(updateTimeout.terminal).toBe(false);
   });
 });

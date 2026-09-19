@@ -49,6 +49,17 @@ const TOKEN_ABOUT_TO_EXPIRE_MS = 3 * 60 * 1000;
  * from ever being announced, leaving an agent on a loading screen with no error and no timeout. */
 const HYDRATION_TIMEOUT_MS = 10_000;
 
+/** Options for `new Client(token, options)` / `Client.create(token, options)`. */
+export interface ClientOptions {
+  /**
+   * How long Message#updateBody / Message#updateAttributes wait for the matching
+   * `message.updated` WS echo before rejecting with MessageUpdateTimeoutError. Defaults to
+   * Conversation's DEFAULT_MESSAGE_UPDATE_TIMEOUT_MS (12s). Tests pass a short value so they
+   * don't have to wait out production timing.
+   */
+  messageUpdateTimeoutMs?: number;
+}
+
 // Matches @twilio/conversations' own `Client` — the single entry point the reference frontend
 // constructs with `new Client(token)`. Everything Twilio-specific (Chat Grant JWTs, Conversation
 // Service SIDs) is gone; `token` here is zavu's own agent WS token, the exact same one
@@ -73,8 +84,9 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   // via agentId + Conversation's own per-chat participant map instead, since one agent token is
   // reused across many chats).
   private ownParticipantId: number | null = null;
+  private readonly messageUpdateTimeoutMs: number | undefined;
 
-  constructor(token: string) {
+  constructor(token: string, options: ClientOptions = {}) {
     super();
     // Built BEFORE the transport: WsTransport opens its socket inside its own constructor, so
     // there must be no window in which a `connected` frame arrives with no promise to settle.
@@ -89,6 +101,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     void this.initPromise.catch(() => undefined);
     this.agentId = this.decodeAgentId(token);
     this.ownParticipantId = this.decodeParticipantId(token);
+    this.messageUpdateTimeoutMs = options.messageUpdateTimeoutMs;
     this.transport = this.buildTransport(token);
     this.scheduleExpiryTimers(token);
   }
@@ -105,8 +118,8 @@ export class Client extends TypedEventEmitter<ClientEvents> {
    *
    * `new Client(token)` keeps working unchanged; this is purely an additional entry point.
    */
-  static async create(token: string): Promise<Client> {
-    const client = new Client(token);
+  static async create(token: string, options: ClientOptions = {}): Promise<Client> {
+    const client = new Client(token, options);
     try {
       await client.initPromise;
     } catch (error) {
@@ -267,7 +280,13 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       existing.refreshFromRest(chat);
       return;
     }
-    const conversation = new Conversation(chat, this.transport, this.agentId, this.ownParticipantId);
+    const conversation = new Conversation(
+      chat,
+      this.transport,
+      this.agentId,
+      this.ownParticipantId,
+      this.messageUpdateTimeoutMs,
+    );
     conversation.on(ConversationEvent.Updated, (payload) => this.emit(ClientEvent.ConversationUpdated, payload));
     this.conversationsByChatId.set(chatId, conversation);
     this.emit(ClientEvent.ConversationJoined, conversation);
@@ -365,7 +384,13 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       if (conversation.sid === sid) return conversation;
     }
     const chat = await RestApi.getChat(this.transport.currentToken, sid);
-    const conversation = new Conversation(chat, this.transport, this.agentId, this.ownParticipantId);
+    const conversation = new Conversation(
+      chat,
+      this.transport,
+      this.agentId,
+      this.ownParticipantId,
+      this.messageUpdateTimeoutMs,
+    );
     conversation.on(ConversationEvent.Updated, (payload) => this.emit(ClientEvent.ConversationUpdated, payload));
     this.conversationsByChatId.set(chat.id, conversation);
     return conversation;

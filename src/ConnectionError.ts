@@ -45,3 +45,22 @@ export class SendTimeoutError extends ConnectionError {
     Object.setPrototypeOf(this, SendTimeoutError.prototype);
   }
 }
+
+/**
+ * The `message.updateBody()`/`message.updateAttributes()` equivalent of SendTimeoutError: neither
+ * call resolves from its REST response — both resolve once the corresponding `message.updated`
+ * echo round-trips back over the socket (Conversation#awaitMessageUpdate), same "no synchronous
+ * ack on the wire" reasoning as a text send. Without this, an echo that never arrives (observed
+ * against zavu: a `body` update followed immediately by an `attributes` update on the SAME
+ * message can leave the second one un-echoed) left the promise pending forever — see
+ * docs/solucion-de-problemas.md.
+ */
+export class MessageUpdateTimeoutError extends ConnectionError {
+  /** `terminal` defaults to false, matching SendTimeoutError: this is a single stuck write, not a
+   * statement about the connection's own health — the transport itself may be perfectly fine. */
+  constructor(message: string, options: { terminal?: boolean } = {}) {
+    super(message, { terminal: options.terminal ?? false });
+    this.name = "MessageUpdateTimeoutError";
+    Object.setPrototypeOf(this, MessageUpdateTimeoutError.prototype);
+  }
+}
