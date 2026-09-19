@@ -1,12 +1,13 @@
 export { configure } from "./config.js";
 export { Client } from "./Client.js";
-export { Conversation } from "./Conversation.js";
+export type { ClientOptions } from "./Client.js";
+export { Conversation, DEFAULT_MESSAGE_UPDATE_TIMEOUT_MS } from "./Conversation.js";
 export { Message } from "./Message.js";
 export { MessageBuilder } from "./MessageBuilder.js";
 export { Participant } from "./Participant.js";
 export { Media } from "./Media.js";
 export { Paginator } from "./Paginator.js";
-export { ConnectionError, SendTimeoutError } from "./ConnectionError.js";
+export { ConnectionError, SendTimeoutError, MessageUpdateTimeoutError } from "./ConnectionError.js";
 export { ClientEvent, ConversationEvent } from "./events.js";
 export type { SbxConversationsConfig } from "./config.js";
 export { ClientState, ConnectionState, ConversationUpdateReason, MessageUpdateReason } from "./types.js";
