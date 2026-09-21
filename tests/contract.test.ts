@@ -138,6 +138,32 @@ describe("contrato público — valores de los que depende sbx-omnichannel-ui", 
     expect(rest).not.toContain("  identify:");
   });
 
+  it("Participant.name se lee de raw.name (fallback a raw.agent.name) — reporte de sbx-omnichannel-ui 2026-09-21", () => {
+    // El backend ya manda `name` directo para un HUMAN_AGENT (chat.repo.ts#toParticipantPublic,
+    // fijo 2026-09-21) — este es el camino normal, no el de respaldo.
+    const withName = new Participant(participant({ participant_type: "HUMAN_AGENT", name: "Admin Admin" }) as any);
+    expect(withName.name).toBe("Admin Admin");
+
+    // Respaldo explícito que pide el reporte, por si `name` llega null contra un backend/dato viejo.
+    const fallback = new Participant(participant({
+      participant_type: "HUMAN_AGENT", name: null, agent: { id: 62, name: "Asesor Lider" },
+    }) as any);
+    expect(fallback.name).toBe("Asesor Lider");
+
+    // Sin nombre en ningún nivel (un USER, por ejemplo) — nunca debe inventar uno.
+    const neither = new Participant(participant({ name: null }) as any);
+    expect(neither.name).toBeNull();
+  });
+
+  it("Message.author sigue siendo la identity, no el nombre — un caller que compara author === selfIdentity no debe romperse", () => {
+    // El propio reporte pidió el nombre como campo nuevo (participant.name), no un cambio de
+    // contrato de `author` — esta prueba fija esa decisión de diseño para que nadie la revierta
+    // sin querer creyendo que "arregla" el mismo reporte.
+    const p = new Participant(participant({ participant_type: "HUMAN_AGENT", indentify: "agent_62", name: "Admin Admin" }) as any);
+    expect(p.identity).toBe("agent_62");
+    expect(p.identity).not.toBe(p.name);
+  });
+
   it("Conversation.sid usa conversation_sid, con el id numérico como respaldo", async () => {
     const client = newClient("agent-token");
     const conversation = await waitFor<any>(client, "conversationJoined");
