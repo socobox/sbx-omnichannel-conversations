@@ -39,13 +39,31 @@ export class Message {
     this.index = raw.id;
     this.body = raw.body;
     this.author = conversation.participantIdentity(raw.participant_id) ?? null;
-    // zavu's own `metadata` already carries a redundant `custom_metadata` copy of itself (a
-    // Rails-serializer artifact, see restApi.ts's RestChatMessage comment) — dropped here so
-    // `message.attributes` isn't cluttered with a duplicate. `reactions` arrives as a sibling
-    // field on the raw row, surfaced at the top level of `attributes` to match what a component
-    // reading `message.attributes.reactions` expects.
-    const { custom_metadata, ...rest } = raw.metadata ?? {};
-    this.attributes = { ...rest, reactions: raw.reactions ?? [] } as unknown as JSONValue;
+    // zavu's `toChatMessagePublic` (chat.repo.ts) wraps whatever is actually stored in
+    // `chat_messages.metadata` one level deeper, under the metadata's own `custom_metadata` key —
+    // a straight port of Rails' `ChatMessageSerializer#metadata`
+    // (`object.metadata.merge(custom_metadata: object.metadata)`), confirmed identical against
+    // sbx-omnichannel-api. That nested copy, NOT the top level, is the one that reflects what a
+    // client last wrote: `PUT .../messages/:id` merges `metadata` SHALLOWLY into the stored value
+    // (`ChatMessage#metadata=`: `metadata.merge(val)`, ported verbatim in
+    // web_chat.repo.ts#updateMessage) — so a caller that sends its own `custom_metadata` key (as
+    // this package's apps do, e.g. edit-history tracking via updateAttributes) overwrites the
+    // TOP-LEVEL `custom_metadata` outright, and only the nested copy underneath still carries the
+    // fully-merged, faithful value. Previously this dropped `metadata.custom_metadata` entirely,
+    // silently losing anything stored there (reported from sbx-omnichannel-ui: edited messages'
+    // `update_history` vanished from `message.attributes`). `attributes` is therefore built from
+    // `custom_metadata`'s OWN content when it's a plain object, falling back to the rest of
+    // `metadata` only for a row that predates this wrapping (defensive — every message
+    // `toChatMessagePublic` serializes already carries the key, even if empty: `{}` for a message
+    // that was never edited). `reactions` stays a raw sibling field, never something a caller
+    // writes via updateAttributes, so it's always taken straight from `raw.reactions`.
+    const rawMetadata = (raw.metadata ?? {}) as Record<string, unknown>;
+    const { custom_metadata, ...rest } = rawMetadata;
+    const base =
+      custom_metadata && typeof custom_metadata === "object" && !Array.isArray(custom_metadata)
+        ? (custom_metadata as Record<string, unknown>)
+        : rest;
+    this.attributes = { ...base, reactions: raw.reactions ?? [] } as unknown as JSONValue;
     this.dateCreated = new Date(raw.created_at);
     this.dateUpdated = new Date(raw.updated_at);
     this.conversation = conversation;

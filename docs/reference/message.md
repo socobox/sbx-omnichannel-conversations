@@ -42,7 +42,7 @@ insertaron en el medio, no mensajes borrados de este chat. Dos consecuencias pr�
 | `index` | `number` | El id de fila de base de datos — ver la sección de arriba. |
 | `body` | `string \| null` | Texto del mensaje. `null` en un mensaje puramente de adjunto. |
 | `author` | `string \| null` | La `identity` del participante que lo mandó — resuelta sin red, ver `Conversation#participantIdentity`. |
-| `attributes` | `JSONValue` | `metadata` del mensaje (sin el `custom_metadata` duplicado interno) + `reactions` como campo hermano. |
+| `attributes` | `JSONValue` | El contenido REAL de `metadata` del mensaje + `reactions` como campo hermano — ver nota abajo sobre `custom_metadata`. |
 | `dateCreated` / `dateUpdated` | `Date` | — |
 | `conversation` | `Conversation` | La conversación dueña de este mensaje. |
 | `attachedMedia` | `Media[] \| null` | `null` si no hay adjunto; si lo hay, un array de **un solo** `Media` — zavu no soporta múltiples adjuntos por mensaje hoy. |
@@ -63,10 +63,17 @@ console.log(message.attributes);
 
 Nota sobre `attributes.reactions`: el backend manda `reactions` como un campo HERMANO de
 `metadata` en la fila cruda (`internal/restApi.ts:16-19`, `RestChatMessage`), no anidado dentro.
-`Message.ts:47-48` lo eleva al nivel superior de `attributes` para que
-`message.attributes.reactions` funcione tal como un componente ya lo espera — y de paso descarta
-`custom_metadata`, que es una copia redundante que el serializador de Rails agrega dentro de
-`metadata` por razones de compatibilidad ajenas a este paquete.
+El constructor de `Message` lo eleva al nivel superior de `attributes` para que
+`message.attributes.reactions` funcione tal como un componente ya lo espera.
+
+Nota sobre `metadata.custom_metadata`: el serializador de zavu (`toChatMessagePublic`, puerto fiel
+de `ChatMessageSerializer` de Rails) envuelve el `metadata` realmente guardado un nivel más
+adentro, bajo su propia clave `custom_metadata` — es decir, `metadata` en la fila cruda es
+`{ ...stored, custom_metadata: stored }`. `attributes` se construye a partir del CONTENIDO de esa
+clave anidada (no del nivel superior), porque es la única copia que sigue siendo fiel a lo último
+que se escribió — ver el comentario en `Message.ts` (constructor) para el porqué exacto. Para un
+mensaje que nunca fue editado, `stored` es `{}`, así que `attributes` queda en `{}` (más
+`reactions`).
 
 ## Métodos
 
@@ -127,6 +134,14 @@ console.log(updated.attributes); // { ...lo que ya había, flagged: true, review
 **Qué esperar.** Igual que `updateBody`: una nueva instancia de `Message`, resuelta cuando el eco
 `message.updated` llega. El merge es server-side (`web_chat.repo.ts#updateMessage` en zavu) — lo
 que ya tenías en `metadata` no se pierde, solo se le agregan/sobrescriben las claves que mandaste.
+
+**El merge es superficial (shallow), no profundo.** Solo se preservan las claves de PRIMER NIVEL
+que no mandaste — si mandas `{ custom_metadata: { foo: 1 } }` y ya existía
+`custom_metadata: { bar: 2 }`, el resultado es `custom_metadata: { foo: 1 }` (pierde `bar`), NO
+`{ foo: 1, bar: 2 }`. Esto importa para cualquier feature que acumule datos dentro de una sola
+clave anidada (p. ej. un historial de ediciones bajo `custom_metadata.update_history`): cada
+llamada a `updateAttributes` debe mandar el objeto COMPLETO y ya acumulado bajo esa clave, leyendo
+primero `message.attributes` — nunca asumir que el backend lo acumula por ti.
 
 **Qué puede salir mal.** Este método sí funciona para todos los canales — no tiene la restricción
 `client === 'web'` de `updateBody`. Cualquier falla que veas aquí es un error REST genérico

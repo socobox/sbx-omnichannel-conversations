@@ -15,8 +15,10 @@ export interface RestReaction {
 
 // Matches zavu's own `ChatMessagePublicRow` exactly (see sbx-omnichannel-zavu's
 // `toChatMessagePublic`, src/db/repos/chat.repo.ts) — `reactions` is a top-level sibling of
-// `metadata`, NOT nested inside it (the serializer duplicates raw metadata under
-// `metadata.custom_metadata` for a Rails-compat reason unrelated to this package).
+// `metadata`, NOT nested inside it. The serializer also duplicates the raw, stored metadata one
+// level deeper under `metadata.custom_metadata` (a straight port of Rails' own
+// `ChatMessageSerializer#metadata`) — see Message.ts's constructor for why THAT nested copy, not
+// the top level, is what `message.attributes` is actually built from.
 export interface RestChatMessage {
   id: number;
   sid: string | null;
