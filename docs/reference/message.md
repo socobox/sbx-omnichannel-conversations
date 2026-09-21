@@ -41,7 +41,8 @@ insertaron en el medio, no mensajes borrados de este chat. Dos consecuencias pr�
 | `sid` | `string` | `raw.sid`, o el `id` como `string` si `sid` es `null`. |
 | `index` | `number` | El id de fila de base de datos — ver la sección de arriba. |
 | `body` | `string \| null` | Texto del mensaje. `null` en un mensaje puramente de adjunto. |
-| `author` | `string \| null` | La `identity` del participante que lo mandó — resuelta sin red, ver `Conversation#participantIdentity`. |
+| `author` | `string \| null` | La `identity` del participante que lo mandó — resuelta sin red, ver `Conversation#participantIdentity`. Para un `HUMAN_AGENT` esto es un id opaco (`"agent_62"`), nunca un nombre — usa `authorName` si necesitas mostrar quién escribió. |
+| `authorName` | `string \| null` | **Desde v0.3.0-beta.4.** El nombre real que el backend tiene para este participante (`participant.name`, con respaldo a `participant.agent?.name`) — `null` solo si el backend no tiene ninguno. Es un GETTER, no un valor fijado al construir el mensaje: si el participante no era parte del listado inicial de la conversación (p. ej. se agregó por una transferencia después de que este `Client` ya la tenía abierta), `Conversation` dispara sola una recarga en segundo plano (`getParticipants()`) — volver a leer `authorName` un momento después ya refleja el nombre real, sin nada más que hacer del lado del consumidor. |
 | `attributes` | `JSONValue` | El contenido REAL de `metadata` del mensaje + `reactions` como campo hermano — ver nota abajo sobre `custom_metadata`. |
 | `dateCreated` / `dateUpdated` | `Date` | — |
 | `conversation` | `Conversation` | La conversación dueña de este mensaje. |

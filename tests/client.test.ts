@@ -192,6 +192,78 @@ describe("Client", () => {
     client.shutdown();
   });
 
+  it("Message#authorName resolves whatever name the backend gave that participant, distinct from author's opaque identity", async () => {
+    const client = newClient("agent-token");
+    await waitFor(client, "conversationJoined");
+
+    // participant 10: USER "Ada" (see baseChat()) — a customer CAN have a real name too (real
+    // production data always does, e.g. "Martin1"/"Martin Zuleta"); authorName isn't restricted
+    // to HUMAN_AGENT, it just surfaces whatever `name` the backend sent for this participant.
+    const customerMsg: RestChatMessage = {
+      id: 101, sid: "IM101", body: "hola", media: null, media_type: null,
+      metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    const customerAdded = waitFor<any>(client, "messageAdded");
+    broadcast({ type: "message.new", chat_message: customerMsg });
+    const customerMessage = await customerAdded;
+    expect(customerMessage.author).toBe("customer_1");
+    expect(customerMessage.authorName).toBe("Ada");
+
+    // participant 11: HUMAN_AGENT "Agent" (see baseChat()) — report from sbx-omnichannel-ui:
+    // author alone only ever gave "agent_99", never a name a UI could show directly.
+    const agentMsg: RestChatMessage = {
+      id: 102, sid: "IM102", body: "hi there", media: null, media_type: null,
+      metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 11,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    const agentAdded = waitFor<any>(client, "messageAdded");
+    broadcast({ type: "message.new", chat_message: agentMsg });
+    const agentMessage = await agentAdded;
+    expect(agentMessage.author).toBe("agent_99");
+    expect(agentMessage.authorName).toBe("Agent");
+
+    client.shutdown();
+  });
+
+  it("a message from a participant not yet known resolves authorName once the background refetch completes, instead of staying a dead-end placeholder", async () => {
+    // Report (sbx-omnichannel-ui, found reading the code — a participant added after this
+    // Conversation's initial hydration, e.g. by a transfer, used to resolve as `participant_<id>`
+    // FOREVER: no path ever backfilled the real identity/name.
+    const client = newClient("agent-token");
+    await waitFor(client, "conversationJoined");
+
+    const newAgentMsg: RestChatMessage = {
+      id: 103, sid: "IM103", body: "me hago cargo del chat", media: null, media_type: null,
+      metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 132,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    const addedPromise = waitFor<any>(client, "messageAdded");
+    // The mock backend now "knows" participant 132 too (as a real GET /chats/:id would, once the
+    // transfer that added them has actually happened server-side) — simulates the real timing:
+    // the WS frame for their message can arrive before this Client's own next full chat refetch.
+    chats.set("1", { ...chats.get("1")!, participants: [
+      ...chats.get("1")!.participants!,
+      { id: 132, agent_id: 132, indentify: "agent_132", name: "Asesor Lider", sid: "MB132", conversation_sid: null, chat_id: 1, participant_type: "HUMAN_AGENT", metadata: {}, created_at: new Date(0).toISOString(), updated_at: new Date(0).toISOString() },
+    ] });
+    broadcast({ type: "message.new", chat_message: newAgentMsg });
+    const message = await addedPromise;
+
+    // Synchronously: the placeholder, immediately usable, never undefined.
+    expect(message.author).toBe("participant_132");
+    expect(message.authorName).toBeNull();
+
+    // The background refetch (Conversation#getParticipants) is already in flight — give it a
+    // tick to land, then re-check the SAME message instance. `authorName` is a live getter (not
+    // captured at construction) so it now resolves; `author` itself stays exactly what it was —
+    // it's a plain identity string, captured once, same as every other message's.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(message.author).toBe("participant_132");
+    expect(message.authorName).toBe("Asesor Lider");
+
+    client.shutdown();
+  });
+
   it("resolves a top-level `reactions` field into message.attributes.reactions", async () => {
     const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");

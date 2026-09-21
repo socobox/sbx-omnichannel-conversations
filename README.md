@@ -90,13 +90,15 @@ This package implements the subset of `@twilio/conversations` actually used by
   `lastReadMessageIndex`, events `updated` / `messageAdded` / `messageUpdated({message, updateReasons})`,
   `getMessages(pageSize)`, `getUnreadMessagesCount()`, `setAllMessagesRead()`,
   `setAllMessagesUnread()`, `sendMessage(body, attributes)`, `prepareMessage()`, `getParticipants()`
-- `Message` — `sid`, `index`, `body`, `author`, `attributes`, `type`, `media` (deprecated,
+- `Message` — `sid`, `index`, `body`, `author`, `authorName` (the real display name for `author`'s
+  opaque identity, e.g. `"agent_62"` -> `"Admin Admin"`), `attributes`, `type`, `media` (deprecated,
   single-attachment alias), `dateCreated`, `dateUpdated`, `conversation`, `attachedMedia`,
   `updateBody(body)`, `updateAttributes(attributes)`
 - `MessageBuilder` — `prepareMessage()`'s return value: `setBody(text)`, `setAttributes(attrs)`,
   `addMedia(payload)`, `build().send()` — only the subset the reference frontend actually calls
   (single attachment; more than one throws a clear error, see below)
-- `Participant` — `sid`, `identity`, `attributes`, `type`, `bindings` (best-effort, not strictly
+- `Participant` — `sid`, `identity`, `name` (the real display name — `identity` is an opaque id
+  like `"agent_62"`, never a name), `attributes`, `type`, `bindings` (best-effort, not strictly
   typed per channel)
 - `Media` — `contentType`, `filename`, `getContentTemporaryUrl()`
 - `Paginator<T>` — `items`, `hasNextPage`, `hasPrevPage`, `nextPage()`, `prevPage()`
