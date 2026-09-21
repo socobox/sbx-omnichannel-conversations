@@ -199,4 +199,8 @@ exact version). To (re-)publish a version by hand — e.g. one merged before thi
 existed — run it manually via `gh workflow run publish.yml` (or the *Run workflow* button on the
 Actions tab); it uses whatever version is currently in `package.json` on `main`.
 
-Requires the `NPM_TOKEN` repo secret (an npm token with publish access).
+Publishes via npm [Trusted Publishing](https://docs.npmjs.com/trusted-publishers/) (OIDC) —
+configured on npm's package settings for `socobox/sbx-omnichannel-conversations`'s `publish.yml`
+workflow. No `NPM_TOKEN` secret needed (removed 2026-09-21, after npm started requiring classic
+automation tokens go through a manual `npm stage publish` + 2FA approval instead of publishing
+directly).

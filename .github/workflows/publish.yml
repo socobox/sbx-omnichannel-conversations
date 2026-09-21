@@ -22,10 +22,14 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version-file: ".nvmrc"
           registry-url: "https://registry.npmjs.org"
+      # npm Trusted Publishing (OIDC) needs npm >=11.5.1 — newer than what some Node 24 patch
+      # builds bundle. setup-node@v6 handles the actual OIDC handshake (via `id-token: write`
+      # above) as long as the npm binary itself understands the protocol.
+      - run: npm install -g npm@latest
       - run: bun install
       - run: bun run build
       - run: bun test
@@ -52,11 +56,15 @@ jobs:
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Trusted Publishing (OIDC) — configured 2026-09-21 on npm's package settings (GitHub
+      # Actions, socobox/sbx-omnichannel-conversations, publish.yml). No NODE_AUTH_TOKEN/NPM_TOKEN
+      # needed: npm's CLI exchanges the `id-token: write` OIDC token above for a short-lived
+      # publish credential itself. This replaced the classic automation token after npm started
+      # requiring it go through a manual `npm stage publish` + 2FA approval instead of publishing
+      # directly (https://github.blog/changelog/2026-07-31-restricting-npm-bypass-2fa-granular-access-tokens/).
       - name: Publish to npm
         if: steps.check.outputs.already_published == 'false'
         run: npm publish --provenance --access public --tag "${{ steps.check.outputs.tag }}"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         if: steps.check.outputs.already_published == 'false'
