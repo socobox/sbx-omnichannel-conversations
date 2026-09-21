@@ -212,6 +212,70 @@ describe("Client", () => {
     client.shutdown();
   });
 
+  it("message.attributes surfaces a previously-edited message's update_history from the backend's double-nested custom_metadata wrap", async () => {
+    // Reproduces the real shape reported from production (sbx-omnichannel-ui, 2026-09-21):
+    // a message already edited once carries its ORIGINAL, faithful metadata one level deeper
+    // than the top level, because toChatMessagePublic (chat.repo.ts, a straight port of Rails'
+    // `object.metadata.merge(custom_metadata: object.metadata)`) wraps whatever was stored
+    // (itself already `{ reactions: [], custom_metadata: { update_history: [...] } }` from the
+    // FIRST edit) inside a second `custom_metadata` key. Discarding `metadata.custom_metadata`
+    // outright (the pre-fix behavior) loses the history entirely; the fix must read the nested
+    // copy's OWN content as the real attributes, not the shadowed top level.
+    const client = newClient("agent-token");
+    await waitFor(client, "conversationJoined");
+
+    const editedOnce: RestChatMessage = {
+      id: 100, sid: "IM100", body: "Como vas compadre?", media: null, media_type: null,
+      metadata: {
+        reactions: [],
+        custom_metadata: {
+          reactions: [],
+          custom_metadata: {
+            update_history: [
+              { new_body: "Como vas compadre?", prev_body: "Como vas?", update_at: "2026-09-21T16:51:00.256Z", update_user: "admin@demo.com" },
+            ],
+          },
+        },
+      },
+      reactions: [],
+      response_time: null, chat_id: 1, participant_id: 10,
+      created_at: new Date(0).toISOString(), updated_at: new Date().toISOString(),
+    };
+    const updatedPromise = waitFor<any>(client, "messageUpdated");
+    broadcast({ type: "message.updated", chat_message: editedOnce });
+    const { message } = await updatedPromise;
+
+    expect(message.attributes).toEqual({
+      reactions: [],
+      custom_metadata: {
+        update_history: [
+          { new_body: "Como vas compadre?", prev_body: "Como vas?", update_at: "2026-09-21T16:51:00.256Z", update_user: "admin@demo.com" },
+        ],
+      },
+    });
+
+    client.shutdown();
+  });
+
+  it("message.attributes stays {} (plus reactions) for a message that was never edited", async () => {
+    const client = newClient("agent-token");
+    await waitFor(client, "conversationJoined");
+
+    const neverEdited: RestChatMessage = {
+      id: 100, sid: "IM100", body: "hello", media: null, media_type: null,
+      metadata: { custom_metadata: {} }, reactions: [],
+      response_time: null, chat_id: 1, participant_id: 10,
+      created_at: new Date(0).toISOString(), updated_at: new Date().toISOString(),
+    };
+    const updatedPromise = waitFor<any>(client, "messageUpdated");
+    broadcast({ type: "message.updated", chat_message: neverEdited });
+    const { message } = await updatedPromise;
+
+    expect(message.attributes).toEqual({ reactions: [] });
+
+    client.shutdown();
+  });
+
   it("treats chat.finished as conversationRemoved, keyed by the event's own chat_id", async () => {
     const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
