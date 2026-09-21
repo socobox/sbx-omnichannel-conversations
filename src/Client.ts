@@ -163,6 +163,12 @@ export class Client extends TypedEventEmitter<ClientEvents> {
       void this.joinConversation(chatId).catch((cause) => this.reportError(cause, false));
     });
     transport.on(TransportEvent.ChatFinished, (chatId) => this.removeConversation(chatId));
+    // Reassigned away from this agent (a transfer to someone else) — distinct from ChatFinished:
+    // the chat itself is still active, just no longer this agent's. `leaveConversation` already
+    // existed for the reconnect-reconciliation path (syncConversations); this is the live
+    // counterpart to ChatAssigned above, so a consumer sees it disappear immediately instead of
+    // only on next reconnect.
+    transport.on(TransportEvent.ChatUnassigned, (chatId) => this.leaveConversation(chatId));
     transport.on(TransportEvent.MessageNew, (raw) => this.applyMessage(raw, "added"));
     transport.on(TransportEvent.MessageUpdated, (raw) => this.applyMessage(raw, "updated"));
     // No public "connectionError" surface in the real Client either — a serverError becomes a
@@ -295,7 +301,12 @@ export class Client extends TypedEventEmitter<ClientEvents> {
   /**
    * The counterpart of conversationJoined for a chat this agent no longer owns (reassigned
    * away), as opposed to chat.finished -> conversationRemoved. Declared in the event map since
-   * 0.1 and never actually emitted until now; the reference frontend does listen for it.
+   * 0.1; until now only reachable via the reconnect-reconciliation path (syncConversations
+   * diffing subscribed_chat_ids) — a `chat.unassigned` live frame now also reaches it directly
+   * (see buildTransport's ChatUnassigned handler above), so a transfer-away is reflected
+   * immediately instead of only on the agent's next reconnect (report: sbx-omnichannel-ui, chat
+   * CH016a621028234b41bbdc3c07fa5e567c, 2026-09-21 — the previous agent kept the chat live until
+   * a full page reload).
    *
    * Emits the CACHED instance, never a fresh one: the consumer filters its list by object
    * identity, so a new object would fail to match and leave the conversation stranded on screen.

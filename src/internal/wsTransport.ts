@@ -15,6 +15,7 @@ type ServerMessage =
   | { type: typeof ServerFrameType.MessageUpdated; chat_message: RestChatMessage }
   | { type: typeof ServerFrameType.ChatFinished; chat_id: number }
   | { type: typeof ServerFrameType.ChatAssigned; chat_id: number }
+  | { type: typeof ServerFrameType.ChatUnassigned; chat_id: number }
   | { type: typeof ServerFrameType.Error; message: string };
 
 // Keys stay as string literals, not computed keys off TransportEvent (internal/wireProtocol.ts) —
@@ -37,6 +38,7 @@ interface WsTransportEvents {
   "message.updated": [RestChatMessage];
   "chat.finished": [number];
   "chat.assigned": [number];
+  "chat.unassigned": [number];
   serverError: [TransportError];
 }
 
@@ -196,6 +198,9 @@ export class WsTransport extends TypedEventEmitter<WsTransportEvents> {
         break;
       case ServerFrameType.ChatAssigned:
         this.emit(TransportEvent.ChatAssigned, msg.chat_id);
+        break;
+      case ServerFrameType.ChatUnassigned:
+        this.emit(TransportEvent.ChatUnassigned, msg.chat_id);
         break;
       case ServerFrameType.Error:
         this.emit(TransportEvent.ServerError, { terminal: false, message: msg.message });
