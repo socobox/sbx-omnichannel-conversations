@@ -226,6 +226,37 @@ describe("Client", () => {
     client.shutdown();
   });
 
+  it("treats chat.unassigned as conversationLeft (cached instance, status untouched), keyed by the event's own chat_id", async () => {
+    const client = newClient("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined"); // chat 1
+
+    const leftPromise = waitFor<any>(client, "conversationLeft");
+    broadcast({ type: "chat.unassigned", chat_id: 1 });
+    const left = await leftPromise;
+
+    expect(left).toBe(conversation); // same cached instance, not a fresh one — see Client.ts's own comment
+    expect(left.sid).toBe("CH1");
+    expect(left.status).toBe("in_progress"); // unlike chat.finished, the chat itself is still active
+    expect((await client.getSubscribedConversations()).items).toHaveLength(0);
+
+    client.shutdown();
+  });
+
+  it("chat.unassigned for a chat_id this Client never joined is a silent no-op", async () => {
+    const client = newClient("agent-token");
+    await waitFor(client, "conversationJoined"); // chat 1
+
+    let sawConversationLeft = false;
+    client.on("conversationLeft", () => { sawConversationLeft = true; });
+    broadcast({ type: "chat.unassigned", chat_id: 999 });
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(sawConversationLeft).toBe(false);
+    expect((await client.getSubscribedConversations()).items).toHaveLength(1);
+
+    client.shutdown();
+  });
+
   it("joins a brand-new conversation on chat.assigned, mirroring conversationJoined for a chat not seen at connect time", async () => {
     chats.set("2", baseChat({ id: 2, conversation_sid: "CH2", chat_messages: [], participants: [] }));
 

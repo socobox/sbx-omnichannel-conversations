@@ -66,7 +66,7 @@ nadie los cambie sin darse cuenta: `sbx-omnichannel-ui` depende de escribirlos e
 | `tokenAboutToExpire` | `Client` | *(sin payload)* | 3 minutos antes de que expire el JWT (claim `exp`), calculado en `scheduleExpiryTimers`. |
 | `tokenExpired` | `Client` | *(sin payload)* | Exactamente en el instante `exp` del JWT. |
 | `conversationJoined` | `Client` | `Conversation` | Un chat entra al set de suscritos: en la hidratación inicial/reconexión (`syncConversations`), o por un frame `chat.assigned` de un chat que este `Client` no tenía cacheado. |
-| `conversationLeft` | `Client` | `Conversation` (instancia **cacheada**, no una nueva) | El chat **sigue existiendo** pero salió de `subscribed_chat_ids` en una reconexión — típicamente porque te reasignaron el chat a otro agente. Ver la nota "conversationLeft vs conversationRemoved" más abajo. |
+| `conversationLeft` | `Client` | `Conversation` (instancia **cacheada**, no una nueva) | El chat **sigue existiendo** pero ya no es tuyo — típicamente porque te lo reasignaron a otro agente. **Desde v0.3.0-beta.2**: llega EN VIVO por un frame `chat.unassigned` (sin esperar a la próxima reconexión); antes de eso solo se disparaba al reconectar, cuando `subscribed_chat_ids` ya no incluía el chat. Ver la nota "conversationLeft vs conversationRemoved" más abajo. |
 | `conversationRemoved` | `Client` | `Conversation` | Llega un frame `chat.finished` — el chat **terminó** (su `status` pasa a `"finish"`). Ver la misma nota. |
 | `conversationUpdated` | `Client` (relay del `updated` de la `Conversation` afectada) | `{ conversation: Conversation, updateReasons: ConversationUpdateReason[] }` | Cualquier cambio detectado en una conversación ya unida: último mensaje, atributos, status, o el índice de última lectura. El detalle de qué dispara cada `updateReason` está en `conversation.md`. |
 | `messageAdded` | `Client` | `Message` | Frame `message.new` para un chat ya unido (si el chat no está unido, el mensaje se ignora silenciosamente — igual que Twilio). |
@@ -89,9 +89,12 @@ sin filtrar el feed agregado de `Client`.
 Ambos hacen que el chat desaparezca de `getSubscribedConversations()`, pero por razones opuestas:
 
 - **`conversationLeft`** — "**te reasignaron el chat**". El chat sigue vivo en el backend
-  (`status` puede seguir siendo `"in_progress"`), simplemente ya no está en la lista
-  `subscribed_chat_ids` que el servidor reenvía en cada reconexión (`Client.ts:234-243`,
-  `syncConversations`). Nadie decidió que el chat terminó — este agente perdió el acceso.
+  (`status` puede seguir siendo `"in_progress"`), simplemente ya no es tuyo. Llega por dos
+  caminos: en vivo, por un frame `chat.unassigned` (desde v0.3.0-beta.2) en cuanto el backend
+  transfiere el chat a otro agente; y como red de respaldo, al reconectar, si
+  `subscribed_chat_ids` ya no incluye ese chat (`Client.ts:234-243`, `syncConversations`) — por
+  si el frame en vivo se perdió por lo que sea. Nadie decidió que el chat terminó — este agente
+  perdió el acceso.
 - **`conversationRemoved`** — "**el chat terminó**". Llega un frame `chat.finished` explícito
   (`Client.ts:140,316-322`); la conversación pasa su `status` a `"finish"` antes de emitir el
   evento.
@@ -103,11 +106,12 @@ distintos y necesitas escuchar eventos distintos — no puedes inferir cuál pas
 ### Eventos internos (no públicos)
 
 `src/internal/wsTransport.ts` tiene su propio `WsTransportEvents` (`connectionStateChanged`,
-`connected`, `message.new`, `message.updated`, `chat.finished`, `chat.assigned`, `serverError`) y
-`src/internal/wireProtocol.ts` define los nombres de los frames que realmente viajan por el
-WebSocket (`connected`, `message.new`, `message.updated`, `chat.finished`, `chat.assigned`,
-`error`). Ninguno de los dos se exporta desde `src/index.ts` ni debería usarse desde fuera del
-paquete — `Client` es quien traduce todo esto a la superficie pública documentada arriba.
+`connected`, `message.new`, `message.updated`, `chat.finished`, `chat.assigned`,
+`chat.unassigned`, `serverError`) y `src/internal/wireProtocol.ts` define los nombres de los
+frames que realmente viajan por el WebSocket (`connected`, `message.new`, `message.updated`,
+`chat.finished`, `chat.assigned`, `chat.unassigned`, `error`). Ninguno de los dos se exporta desde
+`src/index.ts` ni debería usarse desde fuera del paquete — `Client` es quien traduce todo esto a
+la superficie pública documentada arriba.
 
 ## Cambios de comportamiento en v0.3.0
 
