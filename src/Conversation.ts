@@ -74,7 +74,12 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   private readonly ownParticipantIdFromToken: number | null;
   private cachedMessages: Message[] | null = null;
   private participantIdentities = new Map<number, string>();
+  private participantNames = new Map<number, string | null>();
   private participantIdByAgentId = new Map<number, number>();
+  // Guards against firing a background refetch (see applyRealtimeMessage) more than once per
+  // unknown participant — a burst of messages from the same new participant before the refetch
+  // resolves would otherwise queue one GET /chats/:id per message for no benefit.
+  private participantRefreshInFlight = new Set<number>();
   private pendingMessageUpdates = new Map<number, PendingMessageUpdate[]>();
   /** @internal — per-instance so tests can use a short value instead of waiting out the real
    * default; see the constructor param and DEFAULT_MESSAGE_UPDATE_TIMEOUT_MS above. */
@@ -115,6 +120,13 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     return participantId == null ? undefined : this.participantIdentities.get(participantId);
   }
 
+  /** @internal — used by Message#authorName. `undefined` means "no participant with this id at
+   * all yet" (distinct from `null`, a known participant the backend has no name for — a
+   * customer or a bot). */
+  participantName(participantId: number | null): string | null | undefined {
+    return participantId == null ? undefined : this.participantNames.get(participantId);
+  }
+
   /** @internal — the same per-session token authenticating this conversation's WS connection,
    * reused for its REST calls (see internal/restApi.ts). Read lazily, never captured, since it
    * can rotate underneath this Conversation via Client#updateToken. */
@@ -126,6 +138,7 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     for (const p of participants) {
       if (p.id == null) continue;
       this.participantIdentities.set(p.id, p.indentify ?? `agent_${p.agent_id ?? p.id}`);
+      this.participantNames.set(p.id, p.name ?? p.agent?.name ?? null);
       if (p.agent_id != null) this.participantIdByAgentId.set(p.agent_id, p.id);
     }
   }
@@ -188,10 +201,23 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   /** @internal — called by Client when a fresh message.new/message.updated arrives over WS. */
   applyRealtimeMessage(raw: RestChatMessage, reason: "added" | "updated"): { message: Message; updateReasons: MessageUpdateReason[] } {
     if (raw.participant_id != null && !this.participantIdentities.has(raw.participant_id)) {
-      // A participant we haven't seen yet (e.g. a bot/agent added after this Conversation was
-      // first hydrated) — best-effort identity fallback; a full re-fetch isn't worth it just to
-      // resolve one display name.
+      // A participant we haven't seen yet (e.g. an agent added after this Conversation was first
+      // hydrated, by a transfer this Conversation itself wasn't reassigned away from). Immediate,
+      // synchronous placeholder so `author`/`authorName` are never left `undefined` while the
+      // real data loads — `getParticipants()` (a GET /chats/:id this class already exposes)
+      // resolves the real identity/name shortly after in the background; participantName's own
+      // getter reads the live map, so a caller re-checking `message.authorName` a moment later
+      // sees the real name with no other wiring needed. Report (sbx-omnichannel-ui, found reading
+      // the code, not reproduced live): this used to be a dead-end placeholder
+      // (`participant_<id>`) with no path to ever resolving the real name at all.
       this.participantIdentities.set(raw.participant_id, `participant_${raw.participant_id}`);
+      this.participantNames.set(raw.participant_id, null);
+      if (!this.participantRefreshInFlight.has(raw.participant_id)) {
+        this.participantRefreshInFlight.add(raw.participant_id);
+        void this.getParticipants()
+          .catch(() => { /* best-effort — the placeholder above stays if this fails */ })
+          .finally(() => this.participantRefreshInFlight.delete(raw.participant_id!));
+      }
     }
     const previous = this.cachedMessages?.find((m) => m.index === raw.id) ?? null;
     const message = new Message(raw, this);

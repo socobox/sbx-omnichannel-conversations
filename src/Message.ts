@@ -24,6 +24,7 @@ export class Message {
   readonly index: number;
   readonly body: string | null;
   readonly author: string | null;
+  private readonly participantId: number | null;
   readonly attributes: JSONValue;
   readonly dateCreated: Date;
   readonly dateUpdated: Date;
@@ -39,6 +40,7 @@ export class Message {
     this.index = raw.id;
     this.body = raw.body;
     this.author = conversation.participantIdentity(raw.participant_id) ?? null;
+    this.participantId = raw.participant_id;
     // zavu's `toChatMessagePublic` (chat.repo.ts) wraps whatever is actually stored in
     // `chat_messages.metadata` one level deeper, under the metadata's own `custom_metadata` key —
     // a straight port of Rails' `ChatMessageSerializer#metadata`
@@ -79,6 +81,25 @@ export class Message {
       : null;
     this.type = this.attachedMedia?.length ? MessageType.Media : MessageType.Text;
     this.media = this.attachedMedia?.[0] ?? null;
+  }
+
+  /**
+   * The display name of whoever sent this message, when the backend has one for that
+   * participant (a HUMAN_AGENT — `author` alone only ever gives an opaque identity like
+   * `"agent_62"`, never a name a UI could show directly). `null` for a customer/bot participant
+   * (no name in that case, matching `author`'s own identity for those), or when the participant
+   * is genuinely unknown.
+   *
+   * A GETTER, not a value captured at construction: if this message's participant wasn't part of
+   * this Conversation's initial participant list (a report found this reading the code, not
+   * reproduced live — a participant added after hydration, e.g. by a transfer, whose name a
+   * still-open Conversation hadn't fetched yet), Conversation kicks off a best-effort background
+   * refetch the first time that happens (see Conversation#applyRealtimeMessage). Reading
+   * `authorName` again after that refetch resolves reflects the real name with no extra plumbing
+   * needed here — this class never mutates its own fields after construction.
+   */
+  get authorName(): string | null {
+    return this.conversation.participantName(this.participantId) ?? null;
   }
 
   /**

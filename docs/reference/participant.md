@@ -56,6 +56,7 @@ Si ves eso en una prueba o en un log, la primera sospecha debe ser: el fixture e
 |---|---|---|
 | `sid` | `string` | `raw.sid`, o `raw.conversation_sid`, o el `id` como `string` — el primero que exista. |
 | `identity` | `string \| null` | `raw.indentify` — ver la sección de arriba. |
+| `name` | `string \| null` | **Desde v0.3.0-beta.4.** El nombre real para mostrar (`"Admin Admin"`), no el id opaco de `identity`. `raw.name`, con respaldo a `raw.agent?.name` si viene vacío (defensa en profundidad, no el camino normal — el backend ya manda `name` directo para un `HUMAN_AGENT`). `null` si el backend no tiene ningún nombre para este participante. |
 | `attributes` | `JSONValue` | `raw.metadata` tal cual. |
 | `type` | `string` | `raw.participant_type` (ej. `"USER"`, `"HUMAN_AGENT"`). |
 | `bindings` | `JSONValue` | También `raw.metadata` — ver la nota siguiente. |
