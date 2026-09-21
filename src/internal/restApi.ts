@@ -46,6 +46,10 @@ export interface RestParticipant {
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  // Embedded only for a HUMAN_AGENT participant (see chat.repo.ts#toParticipantPublic on the
+  // backend) — `name` above already mirrors `agent.name` server-side as of 2026-09-21, so this
+  // is a defense-in-depth fallback for Participant#name, not the primary source.
+  agent?: { id: number; name: string | null } | null;
 }
 
 export interface RestChat {
