@@ -65,20 +65,41 @@ export class Message {
       custom_metadata && typeof custom_metadata === "object" && !Array.isArray(custom_metadata)
         ? (custom_metadata as Record<string, unknown>)
         : rest;
-    this.attributes = { ...base, reactions: raw.reactions ?? [] } as unknown as JSONValue;
+    // `attachments` (like `reactions`) is a raw sibling field on `raw`, not something a caller
+    // writes via updateAttributes — stripped here so it never leaks into `attributes` as a stale
+    // duplicate merely because `toChatMessagePublic` wraps the WHOLE stored metadata into
+    // `custom_metadata` (same reasoning `reactions` already gets, just enforced by omission here
+    // instead of by overriding after the spread below).
+    const { attachments: _attachmentsInBase, ...cleanBase } = base;
+    this.attributes = { ...cleanBase, reactions: raw.reactions ?? [] } as unknown as JSONValue;
     this.dateCreated = new Date(raw.created_at);
     this.dateUpdated = new Date(raw.updated_at);
     this.conversation = conversation;
-    this.attachedMedia = raw.media
-      ? [
-          new Media({
-            chatId: raw.chat_id,
-            messageId: raw.id,
-            contentType: raw.media_type ?? "application/octet-stream",
-            getToken: () => conversation.currentToken,
-          }),
-        ]
-      : null;
+    // Multiple attachments (2026-09-22): `raw.attachments` (possibly several) takes priority over
+    // the legacy singular `media`/`media_type` pair — but that pair still gets populated (the
+    // FIRST attachment) by zavu on every send, so this is purely additive: a message from before
+    // this feature existed (or a single-attachment send today) has an empty/absent `attachments`
+    // and falls back to the one-Media-from-media/media_type shape unchanged.
+    this.attachedMedia = raw.attachments?.length
+      ? raw.attachments.map((a) => new Media({
+          chatId: raw.chat_id,
+          messageId: raw.id,
+          contentType: a.content_type ?? "application/octet-stream",
+          filename: a.name,
+          key: a.key,
+          getToken: () => conversation.currentToken,
+        }))
+      : raw.media
+        ? [
+            new Media({
+              chatId: raw.chat_id,
+              messageId: raw.id,
+              contentType: raw.media_type ?? "application/octet-stream",
+              key: raw.media,
+              getToken: () => conversation.currentToken,
+            }),
+          ]
+        : null;
     this.type = this.attachedMedia?.length ? MessageType.Media : MessageType.Text;
     this.media = this.attachedMedia?.[0] ?? null;
   }

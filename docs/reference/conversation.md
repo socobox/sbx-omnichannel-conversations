@@ -316,7 +316,8 @@ más control usa `prepareMessage()` en su lugar, aunque ambos terminan aquí por
 **Firma.**
 ```ts
 async sendMessage(body: SendMessageBody, attributes?: JSONValue): Promise<number>;
-// SendMessageBody = string | { contentType: string | null; media: Blob; filename?: string }
+// SendMessageBody = string | SendMediaOptions | SendMediaOptions[]
+// SendMediaOptions = { contentType: string | null; media: Blob; filename?: string }
 ```
 
 **Ejemplo — texto:**
@@ -325,7 +326,7 @@ const messageIndex = await conversation.sendMessage("Hola, ¿en qué puedo ayuda
 console.log(messageIndex); // 4181 — el id real que asignó el backend, vía el eco de message.new
 ```
 
-**Ejemplo — adjunto:**
+**Ejemplo — un adjunto:**
 ```ts
 const file = new Blob([bytes], { type: "image/png" });
 const messageIndex = await conversation.sendMessage({
@@ -335,19 +336,27 @@ const messageIndex = await conversation.sendMessage({
 });
 ```
 
+**Ejemplo — varios adjuntos en un solo mensaje (desde 2026-09-22):**
+```ts
+const messageIndex = await conversation.sendMessage([
+  { contentType: "image/png", media: fotoFrente, filename: "frente.png" },
+  { contentType: "image/png", media: fotoDorso, filename: "dorso.png" },
+], { document_type: "cedula" });
+```
+
 **Qué esperar.** El `index` del mensaje creado (un id de base de datos, no una posición — ver
 `message.md`).
 - **Texto**: la promesa resuelve solo cuando llega el **eco** — el mismo `message.new` que recibe
-  todo el chat (`Conversation.ts:297-303`, `WsTransport#sendMessage`). No hay confirmación
-  síncrona más rápida que esa.
-- **Media**: resuelve de inmediato con la respuesta de `POST /web_chats/:id/messages`
-  (`Conversation.ts:308`) — no espera ningún eco, porque ese endpoint ya devuelve el mensaje creado
-  en la misma respuesta.
+  todo el chat (`WsTransport#sendMessage`). No hay confirmación síncrona más rápida que esa.
+- **Media** (uno o varios adjuntos): resuelve de inmediato con la respuesta de
+  `POST /web_chats/:id/messages` — no espera ningún eco, porque ese endpoint ya devuelve el mensaje
+  creado en la misma respuesta. Un array manda TODOS los items como attachments de UN solo mensaje
+  (antes solo se podía un ítem a la vez).
 
-Nota: en un envío de media, el parámetro `attributes` **se ignora, no se persiste** —
-`Conversation.ts:294-296` documenta que la ruta de inserción compartida del backend no acepta
-metadata custom al crear el mensaje. No es un descuido silencioso: el adjunto, el `filename` y el
-`contentType` sí se guardan bien.
+**Cambio 2026-09-22:** `attributes` en un envío de media YA se persiste — antes era un gap real
+documentado (la ruta de inserción compartida del backend no aceptaba metadata custom al crear el
+mensaje); ahora `recordMessage` en zavu acepta `attributes` y esta librería los manda como un campo
+`attributes` JSON-codificado del multipart.
 
 **Qué puede salir mal.**
 - Enviar un adjunto sin que este agente tenga un registro de participante en el chat:

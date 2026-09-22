@@ -13,6 +13,15 @@ export interface RestReaction {
   updated_at: string;
 }
 
+// Matches zavu's own `AttachmentPublicRow` (src/db/schema.ts) — a top-level sibling of `metadata`,
+// same pattern as `reactions` below. No Rails equivalent (ChatMessage there has no multi-file
+// concept, only singular `media`/`media_type`) — a genuinely new capability (2026-09-22).
+export interface RestAttachment {
+  key: string;
+  name: string | null;
+  content_type: string | null;
+}
+
 // Matches zavu's own `ChatMessagePublicRow` exactly (see sbx-omnichannel-zavu's
 // `toChatMessagePublic`, src/db/repos/chat.repo.ts) — `reactions` is a top-level sibling of
 // `metadata`, NOT nested inside it. The serializer also duplicates the raw, stored metadata one
@@ -27,6 +36,10 @@ export interface RestChatMessage {
   media_type: string | null;
   metadata: Record<string, unknown>;
   reactions: RestReaction[];
+  // Present (possibly empty) on every message since 2026-09-22; older cached data may lack it
+  // entirely, so every read site treats it as optional. Empty on a single/legacy-attachment
+  // message too — `media`/`media_type` still carry that one, see Message.ts's own comment.
+  attachments?: RestAttachment[];
   response_time: number | null;
   chat_id: number;
   participant_id: number | null;
@@ -136,8 +149,12 @@ export function updateMessage(
   });
 }
 
-export function getMessageMediaUrl(token: string, chatId: number, messageId: number): Promise<{ url: string | null }> {
-  return request(token, paths.webChatMessageMediaUrl(chatId, messageId));
+// `key` (added 2026-09-22): resolves ONE specific attachment on a multi-file message instead of
+// the legacy singular `media` column — omitted, defaults to `media`, unchanged for every existing
+// (single-attachment) caller.
+export function getMessageMediaUrl(token: string, chatId: number, messageId: number, key?: string): Promise<{ url: string | null }> {
+  const path = paths.webChatMessageMediaUrl(chatId, messageId);
+  return request(token, key ? `${path}?key=${encodeURIComponent(key)}` : path);
 }
 
 // Backs Conversation#setAllMessagesRead/setAllMessagesUnread — persists "the last message this
@@ -156,26 +173,40 @@ export function updateParticipant(
   });
 }
 
-// Genuinely new capability (see this package's README) — proxies an agent's outbound attachment
-// to zavu's own SBX upload endpoint and creates the message in one round trip. Only works for
-// `client === 'web'` chats; the backend rejects (422) anything else.
+export interface SendMediaFile {
+  file: Blob;
+  filename?: string;
+  contentType?: string | null;
+}
+
+// Genuinely new capability (see this package's README) — proxies an agent's outbound attachment(s)
+// to zavu's own SBX upload endpoint and creates the message in one round trip. Works for every
+// channel as of 2026-09-21 (a `client === 'web'`-only restriction existed before that). Multiple
+// files (added 2026-09-22): plain multipart form-data already supports a repeated field name, so
+// more than one item just appends "file" more than once — matches zavu's own
+// `form.getAll("file")` on the other end exactly.
 export function sendMedia(
   token: string,
   chatId: number,
   participantId: number,
-  file: Blob,
-  filename: string | undefined,
-  contentType: string | null | undefined,
+  files: SendMediaFile[],
   body: string | undefined,
+  attributes?: JSONValue,
 ): Promise<RestChatMessage> {
-  // The caller's explicit contentType is authoritative (matches real Twilio's own contract),
-  // not just whatever the Blob's own .type happens to be — a FormData part's Content-Type can
-  // only be set by constructing a fresh Blob with the desired type.
-  const filePart = contentType && contentType !== file.type ? new Blob([file], { type: contentType }) : file;
   const form = new FormData();
-  form.append("file", filePart, filename ?? "attachment");
+  for (const { file, filename, contentType } of files) {
+    // The caller's explicit contentType is authoritative (matches real Twilio's own contract),
+    // not just whatever the Blob's own .type happens to be — a FormData part's Content-Type can
+    // only be set by constructing a fresh Blob with the desired type.
+    const filePart = contentType && contentType !== file.type ? new Blob([file], { type: contentType }) : file;
+    form.append("file", filePart, filename ?? "attachment");
+  }
   form.append("participant_id", String(participantId));
   if (body) form.append("body", body);
+  // Custom metadata at CREATE time (added 2026-09-22, closes a real gap: this was silently
+  // dropped before — see Conversation#sendMessage's own comment). JSON-encoded: multipart has no
+  // native nested-object field type.
+  if (attributes !== undefined) form.append("attributes", JSON.stringify(attributes));
   return requestForm<RestChatMessage>(token, paths.webChatMessages(chatId), form);
 }
 

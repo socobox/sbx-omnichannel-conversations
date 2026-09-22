@@ -586,8 +586,10 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
    * (see the README) — resolves immediately from that REST response, no need to wait for the WS
    * echo since the endpoint already returns the created message. Requires this agent to have a
    * participant record in this chat already (the same requirement the WS text-send path enforces
-   * server-side); `attributes` on a media send isn't persisted yet — a narrow, documented v1 gap
-   * (recordMessage's shared insert path doesn't accept custom metadata at creation time today).
+   * server-side). An array sends every item as ONE message with multiple attachments (2026-09-22
+   * — previously unsupported, see MessageBuilder's own comment). `attributes` on a media send is
+   * now persisted (2026-09-22 — was a narrow, documented v1 gap before: recordMessage's shared
+   * insert path didn't accept custom metadata at creation time).
    */
   async sendMessage(body: SendMessageBody, attributes?: JSONValue): Promise<number> {
     if (typeof body === "string") {
@@ -600,7 +602,9 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     if (participantId == null) {
       throw new Error("sbx-omnichannel-conversations: no participant record for this agent in this chat — cannot send media");
     }
-    const created = await RestApi.sendMedia(this.currentToken, this.chatId, participantId, body.media, body.filename, body.contentType, undefined);
+    const items = Array.isArray(body) ? body : [body];
+    const files = items.map((item) => ({ file: item.media, filename: item.filename, contentType: item.contentType }));
+    const created = await RestApi.sendMedia(this.currentToken, this.chatId, participantId, files, undefined, attributes);
     return created.id;
   }
 }

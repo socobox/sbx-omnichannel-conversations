@@ -4,52 +4,49 @@ Archivo fuente: `src/Media.ts`. Espejo de `@twilio/conversations`' propio `Media
 adjunto a un `Message`. `getContentTemporaryUrl()` resuelve de forma perezosa (una llamada de red
 real, igual que en Twilio), nunca por adelantado para todos los mensajes de un chat.
 
-## `Media.filename` siempre llega `null` en adjuntos entrantes
+## `message.attachedMedia` puede traer más de un `Media` (desde 2026-09-22)
 
-Esto sorprende porque el tipo dice `string | null`, sugiriendo que a veces trae el nombre real del
-archivo — en la práctica, para cualquier adjunto que llega dentro de un `Message` ya existente,
-**siempre es `null`**.
+Antes, un mensaje tenía como máximo un adjunto. Ahora `message.attachedMedia` es un array con UN
+`Media` por cada entrada de `metadata.attachments` — cada uno resuelve su propia URL por separado
+(`getContentTemporaryUrl()` internamente pasa `?key=<la clave de ESE adjunto>` a
+`GET .../media_url`, no la del mensaje entero). `message.media` (deprecated) sigue siendo un alias
+del PRIMERO nada más, igual que su equivalente deprecado en Twilio.
 
-La causa está en cómo `Message.ts` construye el `Media` de un mensaje entrante:
+## `Media.filename` — real desde 2026-09-22, `null` solo para un mensaje viejo o de un solo adjunto sin nombre
+
+Antes de 2026-09-22, `Media.filename` era **siempre `null`** en un adjunto entrante: el backend no
+mandaba ningún campo de nombre de archivo, solo `media` (la clave/URL interna) y `media_type`.
+
+Desde que zavu soporta varios adjuntos por mensaje (`metadata.attachments`, un array de
+`{key, name, content_type}` — ver `schema.ts`'s `AttachmentPublicRow` del lado del backend),
+`RestChatMessage.attachments` SÍ trae el nombre real de cada archivo, y `Message.ts` lo usa
+directamente al construir cada `Media`:
 
 ```ts
-// Message.ts:52-61
-this.attachedMedia = raw.media
-  ? [
-      new Media({
-        chatId: raw.chat_id,
-        messageId: raw.id,
-        contentType: raw.media_type ?? "application/octet-stream",
-        getToken: () => conversation.currentToken,
-        // <- no se pasa `filename` aquí
-      }),
-    ]
-  : null;
+// Message.ts — una fila por attachment cuando `raw.attachments` no está vacío
+this.attachedMedia = raw.attachments?.length
+  ? raw.attachments.map((a) => new Media({
+      chatId: raw.chat_id, messageId: raw.id,
+      contentType: a.content_type ?? "application/octet-stream",
+      filename: a.name, key: a.key,
+      getToken: () => conversation.currentToken,
+    }))
+  : /* fallback a la fila legacy — ver abajo */;
 ```
 
-El constructor de `Media` (`Media.ts:18-24`) sí acepta un `filename` opcional
-(`opts.filename ?? null`), pero **nadie se lo pasa** cuando se construye a partir de un mensaje ya
-recibido: la fila cruda del backend (`RestChatMessage`, `internal/restApi.ts:20-33`) no trae un
-campo de nombre de archivo para el adjunto — solo `media` (la clave/URL interna) y `media_type`
-(el content type). No hay un nombre de archivo original que leer del lado del backend para un
-adjunto entrante, así que `Media.filename` queda `null` siempre en ese camino.
+**Sigue siendo `null`** solo en el camino legacy: un mensaje de ANTES de esta fecha (o que solo
+tiene la columna singular `media`/`media_type`, sin `metadata.attachments`) no tiene ningún nombre
+que leer del backend — ese `Media` se construye sin `filename`, igual que siempre.
 
-La única vez que un `filename` real sí viaja es en el **envío** de un adjunto —
-`Conversation#sendMessage`/`MessageBuilder#addMedia` sí aceptan y mandan `filename` al backend
-(`internal/restApi.ts:139-149`) — pero eso queda en la fila creada, no reaparece automáticamente
-como `Media.filename` del lado de lectura salvo que el objeto `RestChatMessage` que vuelva por el
-eco se re-mapee con esa información (hoy no ocurre).
-
-**Práctico:** si necesitas mostrar un nombre de archivo en la UI para un adjunto recibido, no
-puede salir de `message.attachedMedia[0].filename` — vas a necesitar derivarlo de otra fuente
-(la URL, el `contentType`, o un nombre genérico), porque este campo no lo trae.
+**Práctico:** para un mensaje nuevo con adjunto(s), `message.attachedMedia![i].filename` ya trae el
+nombre real. Solo hace falta un fallback genérico para mensajes viejos.
 
 ## Propiedades
 
 | Propiedad | Tipo | Notas |
 |---|---|---|
-| `contentType` | `string` | Del `media_type` del mensaje, o `"application/octet-stream"` si viene vacío. |
-| `filename` | `string \| null` | Ver la sección de arriba — `null` en todo adjunto entrante. |
+| `contentType` | `string` | Del `content_type` del attachment (o `media_type` del mensaje en el camino legacy), o `"application/octet-stream"` si viene vacío. |
+| `filename` | `string \| null` | El nombre real del archivo desde 2026-09-22 (ver la sección de arriba) — `null` solo para un mensaje de antes de esa fecha. |
 
 ## Métodos
 

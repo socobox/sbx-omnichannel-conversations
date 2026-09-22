@@ -72,4 +72,7 @@ export interface SendMediaOptions {
   filename?: string;
 }
 
-export type SendMessageBody = string | SendMediaOptions;
+// An array sends every item as ONE message with multiple attachments (added 2026-09-22) — was
+// unsupported before (MessageBuilder#addMedia called more than once threw "sending more than one
+// attachment in a single message isn't supported yet").
+export type SendMessageBody = string | SendMediaOptions | SendMediaOptions[];

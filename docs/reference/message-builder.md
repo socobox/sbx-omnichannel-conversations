@@ -54,9 +54,11 @@ const builder = conversation.prepareMessage()
 
 **Qué esperar.** El mismo `MessageBuilder` (encadenable). No dispara red.
 
-**Qué puede salir mal.** Si el mensaje final resulta ser un envío de media, estos atributos **no
-se persisten** — ver la nota de `conversation.md#sendMessage` sobre por qué un envío de media
-ignora `attributes` (el endpoint de subida compartido de zavu no acepta metadata custom al crear).
+**Qué esperar (actualizado 2026-09-22).** Estos atributos SÍ se persisten en un envío de media —
+antes era un gap real y documentado (el endpoint de subida compartido de zavu no aceptaba metadata
+custom al crear el mensaje); ya se corrigió tanto en el backend (`recordMessage` ahora acepta
+`attributes`) como en esta librería (`RestApi#sendMedia` los manda como un campo `attributes`
+JSON-codificado del multipart, ya que un form no tiene un tipo de campo objeto anidado nativo).
 
 ### `addMedia(payload)`
 
@@ -78,17 +80,18 @@ const builder = conversation.prepareMessage()
 ```
 
 **Qué esperar.** El mismo `MessageBuilder` (encadenable). No sube nada todavía — la subida real
-ocurre en `.build().send()`.
+ocurre en `.build().send()`. Podés llamar `addMedia()` varias veces (desde 2026-09-22): todos los
+adjuntos en la cola se mandan juntos, como UN solo mensaje con varios attachments — antes esto
+rechazaba en `.build().send()` (ver más abajo).
 
-**Qué puede salir mal.** Nada en esta llamada — el límite de un solo adjunto se valida recién en
-`.build().send()`, no aquí, así que puedes llamar `addMedia()` varias veces sin que truene de
-inmediato.
+**Qué puede salir mal.** Nada en esta llamada.
 
 ### `build().send()`
 
-**Qué hace.** Cierra el builder y envía el mensaje: si hay exactamente un adjunto en la cola, lo
-sube vía el mismo camino de media de `Conversation#sendMessage`; si no hay ninguno, envía el texto
-de `setBody()` como mensaje de texto plano.
+**Qué hace.** Cierra el builder y envía el mensaje: si hay uno o más adjuntos en la cola, los sube
+TODOS juntos (un solo mensaje, varios attachments — desde 2026-09-22) vía el mismo camino de media
+de `Conversation#sendMessage`; si no hay ninguno, envía el texto de `setBody()` como mensaje de
+texto plano.
 
 **Cuándo la usas.** El paso final, siempre después de al menos un `setBody()`/`addMedia()`.
 
@@ -97,7 +100,7 @@ de `setBody()` como mensaje de texto plano.
 build(): { send: () => Promise<number | null> };
 ```
 
-**Ejemplo — un adjunto con texto (el texto se ignora):**
+**Ejemplo — un adjunto con texto (el texto se ignora — ver la nota abajo):**
 ```ts
 const index = await conversation.prepareMessage()
   .setBody("este texto se ignora porque hay un adjunto")
@@ -106,6 +109,16 @@ const index = await conversation.prepareMessage()
   .send();
 
 console.log(index); // 4181 — el id real del mensaje creado
+```
+
+**Ejemplo — varios adjuntos en un solo mensaje (desde 2026-09-22):**
+```ts
+const index = await conversation.prepareMessage()
+  .addMedia({ contentType: "image/png", media: fotoFrente, filename: "frente.png" })
+  .addMedia({ contentType: "image/png", media: fotoDorso, filename: "dorso.png" })
+  .setAttributes({ document_type: "cedula" })
+  .build()
+  .send();
 ```
 
 **Ejemplo — solo texto:**
@@ -117,20 +130,16 @@ const index = await conversation.prepareMessage()
 ```
 
 **Qué esperar.** El `index` (id de base de datos, ver `message.md`) del mensaje creado — igual
-contrato que `Conversation#sendMessage`, porque por debajo es exactamente esa misma llamada
-(`MessageBuilder.ts:41-45`). **Con un adjunto en la cola, el `body` de `setBody()` se descarta por
-completo** — `MessageBuilder.ts:42` manda el adjunto solo, ignorando `this.bodyText`; es el mismo
-comportamiento de "media gana sobre texto" que tiene `Conversation#sendMessage` cuando el `body`
-es un objeto de media en vez de un `string`.
+contrato que `Conversation#sendMessage`, porque por debajo es exactamente esa misma llamada. Con
+uno o más adjuntos en la cola, TODOS se mandan juntos como attachments del mismo mensaje.
 
-**Qué puede salir mal.** Si llamaste `addMedia()` más de una vez, rechaza ANTES de tocar red:
-```
-sbx-omnichannel-conversations: sending more than one attachment in a single message isn't supported yet — send each as its own message.
-```
-(`MessageBuilder.ts:37-39`). No es un límite arbitrario de esta librería: el endpoint de subida de
-zavu acepta exactamente un archivo por mensaje hoy. El arreglo es literal — mandar cada adjunto
-como su propio `prepareMessage()...build().send()`, uno por uno.
+**Gap conocido, todavía sin corregir:** con un adjunto en la cola, el `body` de `setBody()` se
+sigue descartando por completo (`MessageBuilder.ts`'s `build().send()` nunca pasa `this.bodyText`
+al camino de media) — es decir, hoy no hay forma de mandar un texto/caption junto con un adjunto a
+través de esta clase. `setAttributes()` sí llega (ver arriba); un caption de texto, no. Si tu caso
+de uso necesita esto, repórtalo — no está armado deliberadamente así, es un gap real encontrado al
+revisar este archivo, no una decisión de producto.
 
-Los demás fallos posibles (sin participante registrado, canal que no soporta media, socket
+**Qué puede salir mal.** Los fallos posibles (sin participante registrado, subida fallida, socket
 desconectado) son los mismos que documenta `conversation.md#sendMessage`, porque terminan en la
 misma llamada.

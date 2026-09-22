@@ -120,22 +120,25 @@ This package implements the subset of `@twilio/conversations` actually used by
 These are real gaps versus the Twilio-backed frontend today, not oversights — each is a
 deliberate scope decision, documented here so a caller doesn't discover them by surprise:
 
-- **`MessageBuilder`/`prepareMessage()` only supports ONE attachment per message.** A real call
-  site (an email compose UI) can attach several files to one message via repeated `addMedia()`
-  calls — zavu's upload endpoint accepts exactly one file per message today, so `build().send()`
-  throws a clear error rather than silently dropping every attachment past the first. `setSubject`,
-  `setEmailBody`, `setEmailHistory`, and Content Template SIDs (real Twilio `MessageBuilder`
-  features) aren't implemented at all — nothing in the migrated frontend calls them.
+- **`MessageBuilder`/`prepareMessage()` supports multiple attachments per message** (as of
+  2026-09-22 — `build().send()` used to throw for more than one `addMedia()` call; zavu's upload
+  endpoint now accepts several `file` fields in one request and stores them all in
+  `metadata.attachments`). `setBody()`'s text is still silently ignored whenever the queue has at
+  least one attachment (`MessageBuilder.ts`'s own `build().send()` never passes it through on that
+  path) — a real, still-open gap found while auditing this file, not a deliberate design choice;
+  `setAttributes()` is unaffected (see below). `setSubject`, `setEmailBody`, `setEmailHistory`, and
+  Content Template SIDs (real Twilio `MessageBuilder` features) aren't implemented at all —
+  nothing in the migrated frontend calls them.
 - **Outbound media/file sending works for every channel** (as of 2026-09-21 — a `client === 'web'`
   restriction existed before that, now lifted; it was never a real product limitation, just the
-  only channel wired up at the time), but only the attachment itself —
-  `conversation.sendMessage({contentType, media, filename})` proxies the blob straight to zavu's
-  own `POST /web_chats/:id/messages`, which uploads it to SBX, dispatches it over whatever
-  provider the chat's channel actually uses (Twilio/Meta WhatsApp, Instagram, RingCentral SMS/MMS,
-  email), and creates the message in one round trip. `attributes` passed alongside a media send are
-  **not persisted yet** (the shared message-insert path zavu's backend uses everywhere doesn't
-  accept custom metadata at creation time) — a narrow, deliberate v1 gap, not a silent drop: the
-  media itself, filename, and content type all work. Requires this agent to already have a
+  only channel wired up at the time). `conversation.sendMessage(mediaOptions | mediaOptions[])`
+  proxies the blob(s) straight to zavu's own `POST /web_chats/:id/messages`, which uploads each to
+  SBX, dispatches over whatever provider the chat's channel actually uses (Twilio/Meta WhatsApp,
+  Instagram, RingCentral SMS/MMS, email — Meta and Instagram only ever deliver the FIRST file when
+  several are sent, matching real platform/Rails limits, not a zavu gap), and creates the message
+  in one round trip, with `metadata.attachments` recording every file regardless of how many
+  actually got delivered externally. `attributes` passed alongside a media send are now persisted
+  too (2026-09-22 — was a real, documented gap before that). Requires this agent to already have a
   participant record in the chat (`sendMessage` rejects with a clear "no participant record for
   this agent in this chat" error otherwise — resolved automatically from the `agent_id` claim in
   the token passed to `new Client(token)`, no new parameters needed at any call site).

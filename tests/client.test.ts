@@ -18,7 +18,7 @@ function fakeJwt(payload: Record<string, unknown>): string {
   return `${b64url({ alg: "none" })}.${b64url(payload)}.sig`;
 }
 
-let mediaUploads: Array<{ chat_id: number; participant_id: string; filename: string }> = [];
+let mediaUploads: Array<{ chat_id: number; participant_id: string; filename: string; filenames: string[]; attributes: unknown }> = [];
 // Every Client built in this file, so afterEach can force-shutdown any that a failing test left
 // alive before reaching its own client.shutdown() line. configure() is process-global state
 // shared across every test FILE in the same `bun test` run (not just this one) — a client leaked
@@ -115,12 +115,19 @@ beforeEach(() => {
       const sendMediaMatch = url.pathname.match(/^\/web_chats\/(\d+)\/messages$/);
       if (sendMediaMatch && req.method === "POST") {
         const form = await req.formData();
-        const file = form.get("file") as File;
+        const files = form.getAll("file") as File[];
         const participantId = String(form.get("participant_id"));
-        mediaUploads.push({ chat_id: Number(sendMediaMatch[1]), participant_id: participantId, filename: file.name });
+        const attributesRaw = form.get("attributes");
+        mediaUploads.push({
+          chat_id: Number(sendMediaMatch[1]), participant_id: participantId, filename: files[0]!.name,
+          filenames: files.map((f) => f.name), attributes: attributesRaw ? JSON.parse(String(attributesRaw)) : undefined,
+        });
+        const attachments = files.map((f, i) => ({ key: `sbx-key-90${i}`, name: f.name, content_type: f.type }));
         const created: RestChatMessage = {
-          id: 900, sid: "IM900", body: (form.get("body") as string) || "", media: "sbx-key-900", media_type: file.type,
-          metadata: {}, reactions: [], response_time: null, chat_id: Number(sendMediaMatch[1]), participant_id: Number(participantId),
+          id: 900, sid: "IM900", body: (form.get("body") as string) || "", media: attachments[0]!.key, media_type: files[0]!.type,
+          metadata: attributesRaw ? JSON.parse(String(attributesRaw)) : {}, reactions: [], response_time: null,
+          chat_id: Number(sendMediaMatch[1]), participant_id: Number(participantId),
+          attachments,
           created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
         };
         return Response.json(created);
@@ -560,7 +567,7 @@ describe("Client", () => {
     const index = await conversation.sendMessage({ contentType: "image/png", media: blob, filename: "photo.png" });
 
     expect(index).toBe(900);
-    expect(mediaUploads).toEqual([{ chat_id: 1, participant_id: "11", filename: "photo.png" }]);
+    expect(mediaUploads).toEqual([{ chat_id: 1, participant_id: "11", filename: "photo.png", filenames: ["photo.png"], attributes: undefined }]);
 
     client.shutdown();
   });
@@ -817,21 +824,74 @@ describe("Client", () => {
       .send();
 
     expect(index).toBe(900);
-    expect(mediaUploads).toEqual([{ chat_id: 1, participant_id: "11", filename: "a.png" }]);
+    expect(mediaUploads).toEqual([{ chat_id: 1, participant_id: "11", filename: "a.png", filenames: ["a.png"], attributes: undefined }]);
 
     client.shutdown();
   });
 
-  it("MessageBuilder rejects more than one attachment per message, clearly", async () => {
+  it("MessageBuilder sends multiple attachments as ONE message (2026-09-22 — previously rejected)", async () => {
     const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 }));
     await waitFor(client, "conversationJoined");
     const conversation = (await client.getSubscribedConversations()).items[0]!;
 
-    const builder = conversation.prepareMessage()
-      .addMedia({ contentType: "image/png", media: new Blob(["x"]) })
-      .addMedia({ contentType: "image/png", media: new Blob(["y"]) });
+    const index = await conversation.prepareMessage()
+      .addMedia({ contentType: "image/png", media: new Blob(["x"]), filename: "one.png" })
+      .addMedia({ contentType: "image/jpeg", media: new Blob(["y"]), filename: "two.jpg" })
+      .build()
+      .send();
 
-    await expect(builder.build().send()).rejects.toThrow(/more than one attachment/);
+    expect(index).toBe(900);
+    expect(mediaUploads).toHaveLength(1); // ONE request, not two — both files in the same multipart form
+    expect(mediaUploads[0]?.filenames).toEqual(["one.png", "two.jpg"]);
+
+    client.shutdown();
+  });
+
+  it("a media send's `attributes` are sent to the backend, not silently dropped (2026-09-22 — previously a documented v1 gap)", async () => {
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 }));
+    await waitFor(client, "conversationJoined");
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
+
+    await conversation.prepareMessage()
+      .addMedia({ contentType: "image/png", media: new Blob(["x"]), filename: "a.png" })
+      .setAttributes({ in_reply_to_message_id: 4180 })
+      .build()
+      .send();
+
+    expect(mediaUploads[0]?.attributes).toEqual({ in_reply_to_message_id: 4180 });
+
+    client.shutdown();
+  });
+
+  it("a message with multiple stored attachments exposes one Media per attachment via attachedMedia", async () => {
+    // Simulates a GET /chats/:id response for a message that already has several attachments
+    // stored (rather than round-tripping through sendMessage, whose sendMedia branch doesn't wait
+    // for a WS echo and so wouldn't be reflected in this Conversation's own cached messages).
+    chats.set("1", { ...chats.get("1")!, chat_messages: [
+      ...chats.get("1")!.chat_messages!,
+      {
+        id: 901, sid: "IM901", body: "", media: "sbx-key-a", media_type: "image/png",
+        metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+        attachments: [
+          { key: "sbx-key-a", name: "one.png", content_type: "image/png" },
+          { key: "sbx-key-b", name: "two.jpg", content_type: "image/jpeg" },
+        ],
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      },
+    ] });
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 }));
+    await waitFor(client, "conversationJoined");
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
+    const page = await conversation.getMessages();
+    const message = page.items.find((m) => m.index === 901)!;
+
+    expect(message.attachedMedia).toHaveLength(2);
+    expect(message.attachedMedia![0]!.filename).toBe("one.png");
+    expect(message.attachedMedia![1]!.filename).toBe("two.jpg");
+    expect(message.media).toBe(message.attachedMedia![0]); // deprecated single-media alias: still the first
+
+    const url0 = await message.attachedMedia![0]!.getContentTemporaryUrl();
+    expect(url0).toBe("https://cdn.example.com/901"); // mock server's media_url handler ignores ?key, real backend doesn't
 
     client.shutdown();
   });

@@ -33,13 +33,11 @@ export class MessageBuilder {
   build(): { send: () => Promise<number | null> } {
     return {
       send: async () => {
-        if (this.mediaItems.length > 1) {
-          throw new Error(
-            "sbx-omnichannel-conversations: sending more than one attachment in a single message isn't supported yet — send each as its own message.",
-          );
-        }
-        if (this.mediaItems.length === 1) {
-          return await this.conversation.sendMessage(this.mediaItems[0]!, this.attrs);
+        // Sends every attached item as ONE message with multiple attachments (2026-09-22) —
+        // previously threw for more than one (`build().send()` required a separate message per
+        // attachment). A single item still goes through the same path, unchanged behavior.
+        if (this.mediaItems.length > 0) {
+          return await this.conversation.sendMessage(this.mediaItems, this.attrs);
         }
         return await this.conversation.sendMessage(this.bodyText ?? "", this.attrs);
       },
