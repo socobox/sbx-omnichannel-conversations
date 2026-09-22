@@ -87,13 +87,18 @@ This package implements the subset of `@twilio/conversations` actually used by
   `getConversationBySid(sid)` → `Promise<Conversation>` / `updateToken(token)` → `Promise<void>` /
   `removeAllListeners()` / `shutdown()`
 - `Conversation` — `sid`, `attributes`, `status`, `dateCreated`, `dateUpdated`, `lastMessage`,
-  `lastReadMessageIndex`, events `updated` / `messageAdded` / `messageUpdated({message, updateReasons})`,
+  `lastReadMessageIndex`, `participants` (synchronous, no network — the current snapshot), events
+  `updated` / `messageAdded` / `messageUpdated({message, updateReasons})` / `participantJoined` /
+  `participantLeft` / `participantUpdated({participant, updateReasons})`,
   `getMessages(pageSize)`, `getUnreadMessagesCount()`, `setAllMessagesRead()`,
-  `setAllMessagesUnread()`, `sendMessage(body, attributes)`, `prepareMessage()`, `getParticipants()`
+  `setAllMessagesUnread()`, `sendMessage(body, attributes)`, `prepareMessage()`,
+  `getParticipants(opts?)` (serves from cache by default now — `{forceFetch: true}` for the old
+  always-network behavior)
 - `Message` — `sid`, `index`, `body`, `author`, `authorName` (the real display name for `author`'s
-  opaque identity, e.g. `"agent_62"` -> `"Admin Admin"`), `attributes`, `type`, `media` (deprecated,
-  single-attachment alias), `dateCreated`, `dateUpdated`, `conversation`, `attachedMedia`,
-  `updateBody(body)`, `updateAttributes(attributes)`
+  opaque identity, e.g. `"agent_62"` -> `"Admin Admin"`), `authorType` (the sender's
+  `participant_type`, e.g. to tell a bot's message from a human agent's without a separate lookup),
+  `attributes`, `type`, `media` (deprecated, single-attachment alias), `dateCreated`, `dateUpdated`,
+  `conversation`, `attachedMedia`, `updateBody(body)`, `updateAttributes(attributes)`
 - `MessageBuilder` — `prepareMessage()`'s return value: `setBody(text)`, `setAttributes(attrs)`,
   `addMedia(payload)`, `build().send()` — only the subset the reference frontend actually calls
   (single attachment; more than one throws a clear error, see below)
@@ -121,16 +126,19 @@ deliberate scope decision, documented here so a caller doesn't discover them by 
   throws a clear error rather than silently dropping every attachment past the first. `setSubject`,
   `setEmailBody`, `setEmailHistory`, and Content Template SIDs (real Twilio `MessageBuilder`
   features) aren't implemented at all — nothing in the migrated frontend calls them.
-- **Outbound media/file sending works, but only for `client === 'web'` chats**, and only the
-  attachment itself — `conversation.sendMessage({contentType, media, filename})` proxies the blob
-  straight to zavu's own `POST /web_chats/:id/messages`, which uploads it to SBX and creates the
-  message in one round trip. `attributes` passed alongside a media send are **not persisted yet**
-  (the shared message-insert path zavu's backend uses everywhere doesn't accept custom metadata at
-  creation time) — a narrow, deliberate v1 gap, not a silent drop: the media itself, filename, and
-  content type all work. Requires this agent to already have a participant record in the chat
-  (`sendMessage` rejects with a clear "no participant record for this agent in this chat" error
-  otherwise — resolved automatically from the `agent_id` claim in the token passed to
-  `new Client(token)`, no new parameters needed at any call site).
+- **Outbound media/file sending works for every channel** (as of 2026-09-21 — a `client === 'web'`
+  restriction existed before that, now lifted; it was never a real product limitation, just the
+  only channel wired up at the time), but only the attachment itself —
+  `conversation.sendMessage({contentType, media, filename})` proxies the blob straight to zavu's
+  own `POST /web_chats/:id/messages`, which uploads it to SBX, dispatches it over whatever
+  provider the chat's channel actually uses (Twilio/Meta WhatsApp, Instagram, RingCentral SMS/MMS,
+  email), and creates the message in one round trip. `attributes` passed alongside a media send are
+  **not persisted yet** (the shared message-insert path zavu's backend uses everywhere doesn't
+  accept custom metadata at creation time) — a narrow, deliberate v1 gap, not a silent drop: the
+  media itself, filename, and content type all work. Requires this agent to already have a
+  participant record in the chat (`sendMessage` rejects with a clear "no participant record for
+  this agent in this chat" error otherwise — resolved automatically from the `agent_id` claim in
+  the token passed to `new Client(token)`, no new parameters needed at any call site).
 - **Message body editing works, but only for `client === 'web'` chats.** `message.updateBody(text)`
   persists the edit server-side and resolves once the `message.updated` broadcast round-trips back
   (there's no synchronous ack). For any other channel (whatsapp/sms/email/instagram) the backend

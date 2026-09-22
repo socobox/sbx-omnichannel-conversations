@@ -45,6 +45,17 @@ export const MessageUpdateReason = {
 } as const;
 export type MessageUpdateReason = (typeof MessageUpdateReason)[keyof typeof MessageUpdateReason];
 
+/** Mirrors @twilio/conversations' own `Participant.UpdateReason`, narrowed to what zavu's
+ * `participant.updated` frame can actually distinguish (see Conversation.ts#applyRealtimeParticipant):
+ * `attributes` covers a plain metadata change, `name` a display-name change (a HUMAN_AGENT's own
+ * `agents.name` edited elsewhere). A sid transition (join/leave) is never reported as an "update" —
+ * that's participantJoined/participantLeft instead, matching Twilio's own event split. */
+export const ParticipantUpdateReason = {
+  Attributes: "attributes",
+  Name: "name",
+} as const;
+export type ParticipantUpdateReason = (typeof ParticipantUpdateReason)[keyof typeof ParticipantUpdateReason];
+
 // Matches @twilio/conversations' own JSONValue exactly (its Message/Conversation `attributes`
 // getters, and every attributes-accepting method, are typed against this, not a plain
 // Record<string, unknown> — some call sites in a migrated frontend pass this type through

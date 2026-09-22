@@ -5,7 +5,7 @@ import { MessageBuilder } from "./MessageBuilder.js";
 import { Participant } from "./Participant.js";
 import { Paginator } from "./Paginator.js";
 import { RestApi, type RestChat, type RestChatMessage, type RestParticipant } from "./internal/restApi.js";
-import { ConversationUpdateReason, MessageUpdateReason, type JSONValue, type SendMessageBody } from "./types.js";
+import { ConversationUpdateReason, MessageUpdateReason, ParticipantUpdateReason, type JSONValue, type SendMessageBody } from "./types.js";
 import type { WsTransport } from "./internal/wsTransport.js";
 import { MessageUpdateTimeoutError } from "./ConnectionError.js";
 
@@ -36,6 +36,13 @@ interface ConversationEvents {
   // not just on Client's aggregated feed. Same payload shape as Client's own events.
   messageAdded: [Message];
   messageUpdated: [{ message: Message; updateReasons: MessageUpdateReason[] }];
+  // Mirrors Twilio's own per-conversation participantJoined/participantLeft/participantUpdated —
+  // see events.ts's own comments on each for exactly what zavu's `participant.updated` frame maps
+  // each one to (there is no separate "left" frame on the wire; it's inferred from a sid
+  // transitioning to null, see applyRealtimeParticipant below).
+  participantJoined: [Participant];
+  participantLeft: [Participant];
+  participantUpdated: [{ participant: Participant; updateReasons: ParticipantUpdateReason[] }];
 }
 
 // Mirrors @twilio/conversations' own `Conversation` — one chat. `sid` is zavu's own
@@ -75,7 +82,16 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
   private cachedMessages: Message[] | null = null;
   private participantIdentities = new Map<number, string>();
   private participantNames = new Map<number, string | null>();
+  private participantTypes = new Map<number, string>();
   private participantIdByAgentId = new Map<number, number>();
+  // The full raw row per participant, not just identity/name/type — needed so `participants`
+  // (a synchronous getter, no network) and `getParticipants({forceFetch: false})` can build real
+  // Participant instances from data this Conversation already has in hand, instead of forcing a
+  // GET /chats/:id every time a caller wants to know who's in the chat. Report (sbx-omnichannel-ui,
+  // 2026-09-21): the full participant list already arrives on every hydration/reconnect/first
+  // message-load and was discarded down to two bare maps, so anything beyond identity/name (e.g.
+  // participant_type) forced a fresh network round trip even though the data had just been seen.
+  private participantRows = new Map<number, RestParticipant>();
   // Guards against firing a background refetch (see applyRealtimeMessage) more than once per
   // unknown participant — a burst of messages from the same new participant before the refetch
   // resolves would otherwise queue one GET /chats/:id per message for no benefit.
@@ -127,6 +143,24 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     return participantId == null ? undefined : this.participantNames.get(participantId);
   }
 
+  /** @internal — used by Message#authorType. `undefined` means "no participant with this id at
+   * all yet", same convention as participantIdentity/participantName above. */
+  participantType(participantId: number | null): string | undefined {
+    return participantId == null ? undefined : this.participantTypes.get(participantId);
+  }
+
+  /**
+   * The current participant list, built ENTIRELY from data this Conversation already has —
+   * never a network call. Populated by the same `GET /chats/:id` this class already makes for
+   * other reasons (construction, reconnect, first message load) and kept live by
+   * `applyRealtimeParticipant` (the `participant.updated` WS frame) — a consumer doesn't have to
+   * choose between "always refetch" and "roll my own cache" (see the report this shipped for).
+   * Empty before the first hydration completes, same as `getMessages()` would be.
+   */
+  get participants(): Participant[] {
+    return Array.from(this.participantRows.values(), (raw) => new Participant(raw));
+  }
+
   /** @internal — the same per-session token authenticating this conversation's WS connection,
    * reused for its REST calls (see internal/restApi.ts). Read lazily, never captured, since it
    * can rotate underneath this Conversation via Client#updateToken. */
@@ -139,6 +173,8 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
       if (p.id == null) continue;
       this.participantIdentities.set(p.id, p.indentify ?? `agent_${p.agent_id ?? p.id}`);
       this.participantNames.set(p.id, p.name ?? p.agent?.name ?? null);
+      this.participantTypes.set(p.id, p.participant_type);
+      this.participantRows.set(p.id, p);
       if (p.agent_id != null) this.participantIdByAgentId.set(p.agent_id, p.id);
     }
   }
@@ -214,7 +250,11 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
       this.participantNames.set(raw.participant_id, null);
       if (!this.participantRefreshInFlight.has(raw.participant_id)) {
         this.participantRefreshInFlight.add(raw.participant_id);
-        void this.getParticipants()
+        // forceFetch: true is load-bearing here, not incidental — getParticipants() now prefers
+        // its own cache by default (see its own comment), but THIS caller exists specifically
+        // because the cache is known to be missing this participant. Without it, this would
+        // silently return the same stale list that got us into this branch in the first place.
+        void this.getParticipants({ forceFetch: true })
           .catch(() => { /* best-effort — the placeholder above stays if this fails */ })
           .finally(() => this.participantRefreshInFlight.delete(raw.participant_id!));
       }
@@ -396,10 +436,60 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     return new Paginator(all, start, pageSize);
   }
 
-  async getParticipants(): Promise<Participant[]> {
+  /**
+   * Previously ALWAYS hit the network (documented as a deliberate limitation —
+   * docs/reference/conversation.md — "no lightweight participants-only endpoint exists yet").
+   * Now serves from what this Conversation already has (see the `participants` getter) unless
+   * `forceFetch` is passed or nothing has been ingested yet — the actual gap the report was about
+   * was never "no lightweight endpoint", it was "the full list already ingested for other reasons
+   * gets thrown away instead of reused". `forceFetch: true` keeps the old always-network behavior
+   * for a caller that genuinely needs a guaranteed-fresh read (e.g. right after an action it knows
+   * changed participants server-side but hasn't necessarily gotten the `participant.updated` echo
+   * for yet).
+   */
+  async getParticipants(opts: { forceFetch?: boolean } = {}): Promise<Participant[]> {
+    if (!opts.forceFetch && this.participantRows.size > 0) return this.participants;
     const chat = await RestApi.getChat(this.currentToken, this.chatId);
     this.ingestParticipants(chat.participants ?? []);
     return (chat.participants ?? []).map((p) => new Participant(p));
+  }
+
+  /**
+   * @internal — called by Client on a `participant.updated` WS frame (see wsTransport.ts). Emits
+   * `participantJoined` for a participant not previously ingested with an active `sid`,
+   * `participantLeft` for a previously-known participant whose `sid` just cleared to null (a
+   * transfer displacing them — participant rows are never deleted, only deactivated this way, see
+   * agentAssignment.service.ts on the backend), and `participantUpdated` for anything else that
+   * actually changed (name or attributes) — a frame that changes nothing detectable (a duplicate,
+   * or a field this client doesn't track) is a silent no-op, same as applyRealtimeMessage would be
+   * for a byte-identical message.
+   */
+  applyRealtimeParticipant(raw: RestParticipant): void {
+    if (raw.id == null) return;
+    const previous = this.participantRows.get(raw.id) ?? null;
+    this.ingestParticipants([raw]);
+    const participant = new Participant(raw);
+
+    if (!previous) {
+      if (raw.sid != null) this.emit(ConversationEvent.ParticipantJoined, participant);
+      return;
+    }
+    if (previous.sid != null && raw.sid == null) {
+      this.emit(ConversationEvent.ParticipantLeft, participant);
+      return;
+    }
+    if (previous.sid == null && raw.sid != null) {
+      this.emit(ConversationEvent.ParticipantJoined, participant);
+      return;
+    }
+    const updateReasons: ParticipantUpdateReason[] = [];
+    if ((previous.name ?? previous.agent?.name ?? null) !== (raw.name ?? raw.agent?.name ?? null)) {
+      updateReasons.push(ParticipantUpdateReason.Name);
+    }
+    if (JSON.stringify(previous.metadata ?? {}) !== JSON.stringify(raw.metadata ?? {})) {
+      updateReasons.push(ParticipantUpdateReason.Attributes);
+    }
+    if (updateReasons.length > 0) this.emit(ConversationEvent.ParticipantUpdated, { participant, updateReasons });
   }
 
   /**

@@ -32,5 +32,14 @@ export const ConversationEvent = {
   Updated: "updated",
   MessageAdded: "messageAdded",
   MessageUpdated: "messageUpdated",
+  /** New — zavu now broadcasts a `participant.updated` frame on transfer (see
+   * Conversation.ts#applyRealtimeParticipant). Fires when a participant this Conversation hadn't
+   * seen before appears with an active `sid` (a new or reactivated HUMAN_AGENT). */
+  ParticipantJoined: "participantJoined",
+  /** Fires when a KNOWN participant's `sid` clears to null (displaced by a transfer) — the closest
+   * zavu equivalent to "left", since a participant row is never deleted, only deactivated. */
+  ParticipantLeft: "participantLeft",
+  /** Fires for any other change to a known participant (name, attributes) that isn't a join/leave. */
+  ParticipantUpdated: "participantUpdated",
 } as const;
 export type ConversationEvent = (typeof ConversationEvent)[keyof typeof ConversationEvent];

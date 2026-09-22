@@ -169,6 +169,11 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     // counterpart to ChatAssigned above, so a consumer sees it disappear immediately instead of
     // only on next reconnect.
     transport.on(TransportEvent.ChatUnassigned, (chatId) => this.leaveConversation(chatId));
+    // No Client-level aggregate for this one — matches real Twilio, where participantJoined/Left/
+    // Updated are only ever emitted on the Conversation itself, never on Client.
+    transport.on(TransportEvent.ParticipantUpdated, ({ chatId, participant }) => {
+      this.conversationsByChatId.get(chatId)?.applyRealtimeParticipant(participant);
+    });
     transport.on(TransportEvent.MessageNew, (raw) => this.applyMessage(raw, "added"));
     transport.on(TransportEvent.MessageUpdated, (raw) => this.applyMessage(raw, "updated"));
     // No public "connectionError" surface in the real Client either — a serverError becomes a

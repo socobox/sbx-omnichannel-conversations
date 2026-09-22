@@ -103,6 +103,20 @@ export class Message {
   }
 
   /**
+   * The `participant_type` (`"USER"`, `"HUMAN_AGENT"`, `"AI_AGENT"`, ...) of whoever sent this
+   * message — e.g. to tell a bot's message apart from a human agent's without a separate
+   * `getParticipants()` round trip and a manual cross-reference against `author`. Same GETTER
+   * shape as `authorName` for the same reason: a participant this Conversation hadn't ingested yet
+   * resolves in the background (see Conversation#applyRealtimeMessage), and reading this again
+   * afterward reflects it with no extra plumbing. `undefined` (not `null`) when the participant is
+   * genuinely still unknown — there is no real Rails/backend state that means "known participant,
+   * no type", unlike `authorName`, so there's no third value to reserve `null` for.
+   */
+  get authorType(): string | undefined {
+    return this.conversation.participantType(this.participantId);
+  }
+
+  /**
    * Persisted body edit — a genuinely new capability with no Rails precedent (see the README):
    * Twilio's own updateBody() was never durable, only ever live in Twilio's hosted conversation.
    * Only works for `client === 'web'` chats; the backend rejects (422) anything else, surfacing

@@ -3,7 +3,7 @@ import { TypedEventEmitter } from "../EventEmitter.js";
 import { wsUrlFor } from "../config.js";
 import { ConnectionError, SendTimeoutError } from "../ConnectionError.js";
 import { ClientFrameType, ServerFrameType, TransportEvent } from "./wireProtocol.js";
-import type { RestChatMessage } from "./restApi.js";
+import type { RestChatMessage, RestParticipant } from "./restApi.js";
 
 // Matches zavu's own /ws/chat wire protocol exactly (src/ws/chatSocket.ts). Every message shape
 // here was verified against the real server source, not assumed from Twilio's own protocol (the
@@ -16,6 +16,7 @@ type ServerMessage =
   | { type: typeof ServerFrameType.ChatFinished; chat_id: number }
   | { type: typeof ServerFrameType.ChatAssigned; chat_id: number }
   | { type: typeof ServerFrameType.ChatUnassigned; chat_id: number }
+  | { type: typeof ServerFrameType.ParticipantUpdated; chat_id: number; participant: RestParticipant }
   | { type: typeof ServerFrameType.Error; message: string };
 
 // Keys stay as string literals, not computed keys off TransportEvent (internal/wireProtocol.ts) —
@@ -39,6 +40,7 @@ interface WsTransportEvents {
   "chat.finished": [number];
   "chat.assigned": [number];
   "chat.unassigned": [number];
+  "participant.updated": [{ chatId: number; participant: RestParticipant }];
   serverError: [TransportError];
 }
 
@@ -201,6 +203,9 @@ export class WsTransport extends TypedEventEmitter<WsTransportEvents> {
         break;
       case ServerFrameType.ChatUnassigned:
         this.emit(TransportEvent.ChatUnassigned, msg.chat_id);
+        break;
+      case ServerFrameType.ParticipantUpdated:
+        this.emit(TransportEvent.ParticipantUpdated, { chatId: msg.chat_id, participant: msg.participant });
         break;
       case ServerFrameType.Error:
         this.emit(TransportEvent.ServerError, { terminal: false, message: msg.message });

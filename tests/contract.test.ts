@@ -223,6 +223,9 @@ describe("contrato público — valores de los que depende sbx-omnichannel-ui", 
     const frozen = [
       "messageAdded",
       "messageUpdated",
+      "participantJoined",
+      "participantLeft",
+      "participantUpdated",
       "updated",
     ];
     expect(Object.values(ConversationEvent).sort()).toEqual(frozen);

@@ -35,6 +35,9 @@ function newClient(token: string): Client {
 // last_read_message_id) — keyed by participant id, null/absent meaning "hasn't read anything".
 let participantLastRead = new Map<number, number | null>();
 let participantUpdates: Array<{ participantId: number; body: unknown }> = [];
+// Counts real GET /chats/:id calls — used to assert Conversation#participants/getParticipants()
+// actually avoid a network round trip when serving from what's already been ingested.
+let chatGetCount = 0;
 
 function baseChat(overrides: Partial<RestChat> = {}): RestChat {
   return {
@@ -68,6 +71,7 @@ beforeEach(() => {
   mediaUploads = [];
   participantLastRead = new Map();
   participantUpdates = [];
+  chatGetCount = 0;
 
   server = Bun.serve({
     port: 0,
@@ -79,6 +83,7 @@ beforeEach(() => {
       }
       const chatMatch = url.pathname.match(/^\/chats\/([^/]+)$/);
       if (chatMatch) {
+        chatGetCount += 1;
         const chat = chats.get(chatMatch[1]!);
         if (!chat) return new Response("not found", { status: 404 });
         // Mirrors the real backend: unread_count is computed relative to the chat's own
@@ -260,6 +265,109 @@ describe("Client", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(message.author).toBe("participant_132");
     expect(message.authorName).toBe("Asesor Lider");
+
+    client.shutdown();
+  });
+
+  it("Conversation#participants reads synchronously from what hydration already ingested, no network call", async () => {
+    const client = newClient("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    const baseline = chatGetCount;
+
+    const participants = conversation.participants;
+    expect(chatGetCount).toBe(baseline); // no GET /chats/:id triggered by reading this
+    expect(participants.map((p: any) => p.identity).sort()).toEqual(["agent_99", "customer_1"]);
+    expect(participants.find((p: any) => p.identity === "agent_99").type).toBe("HUMAN_AGENT");
+
+    client.shutdown();
+  });
+
+  it("Conversation#getParticipants() serves from cache by default; forceFetch: true always hits the network", async () => {
+    const client = newClient("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    const baseline = chatGetCount;
+
+    const cached = await conversation.getParticipants();
+    expect(chatGetCount).toBe(baseline);
+    expect(cached).toHaveLength(2);
+
+    const fresh = await conversation.getParticipants({ forceFetch: true });
+    expect(chatGetCount).toBe(baseline + 1);
+    expect(fresh).toHaveLength(2);
+
+    client.shutdown();
+  });
+
+  it("Message#authorType exposes the sender's participant_type without a separate lookup", async () => {
+    const client = newClient("agent-token");
+    await waitFor(client, "conversationJoined");
+
+    const customerMsg: RestChatMessage = {
+      id: 104, sid: "IM104", body: "hola", media: null, media_type: null,
+      metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    const customerAdded = waitFor<any>(client, "messageAdded");
+    broadcast({ type: "message.new", chat_message: customerMsg });
+    expect((await customerAdded).authorType).toBe("USER");
+
+    const agentMsg: RestChatMessage = {
+      id: 105, sid: "IM105", body: "hi", media: null, media_type: null,
+      metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 11,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    };
+    const agentAdded = waitFor<any>(client, "messageAdded");
+    broadcast({ type: "message.new", chat_message: agentMsg });
+    expect((await agentAdded).authorType).toBe("HUMAN_AGENT");
+
+    client.shutdown();
+  });
+
+  it("a participant.updated frame turns into participantJoined/participantLeft/participantUpdated on the live Conversation", async () => {
+    // Mirrors the real transfer flow: agentAssignment.service.ts broadcasts one frame for the
+    // newly-assigned agent (sid set) and one for the displaced agent (sid -> null), chat-wide —
+    // see sbx-omnichannel-zavu's agentAssignment.service.ts#performAssignAgent. A brand-new
+    // participant id is used for the join/leave pair specifically so "previously known, sid was
+    // already set/unset" isn't ambiguous with "never seen before" — see the update case below for
+    // the other kind of change (same participant, sid never moves).
+    const client = newClient("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+
+    const joinedPromise = waitFor<any>(conversation, "participantJoined");
+    broadcast({
+      type: "participant.updated", chat_id: 1,
+      participant: { id: 132, agent_id: 132, indentify: "agent_132", name: "Asesor Lider", sid: "MB132", conversation_sid: null, chat_id: 1, participant_type: "HUMAN_AGENT", metadata: {}, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    });
+    const joined = await joinedPromise;
+    expect(joined.identity).toBe("agent_132");
+    expect(joined.name).toBe("Asesor Lider");
+
+    const leftPromise = waitFor<any>(conversation, "participantLeft");
+    broadcast({
+      type: "participant.updated", chat_id: 1,
+      participant: { id: 132, agent_id: 132, indentify: "agent_132", name: "Asesor Lider", sid: null, conversation_sid: null, chat_id: 1, participant_type: "HUMAN_AGENT", metadata: {}, created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    });
+    const left = await leftPromise;
+    expect(left.identity).toBe("agent_132");
+
+    // A change with sid staying exactly as it was (here: null, both before and after — matches
+    // participant 10, the base fixture's own USER, whose sid is always null) is `participantUpdated`,
+    // never join/leave — a plain name change, e.g.
+    const updatedPromise = waitFor<any>(conversation, "participantUpdated");
+    broadcast({
+      type: "participant.updated", chat_id: 1,
+      participant: { id: 10, agent_id: null, indentify: "customer_1", name: "Ada Lovelace", sid: null, conversation_sid: null, chat_id: 1, participant_type: "USER", metadata: {}, created_at: new Date(0).toISOString(), updated_at: new Date().toISOString() },
+    });
+    const { participant, updateReasons } = await updatedPromise;
+    expect(participant.name).toBe("Ada Lovelace");
+    expect(updateReasons).toEqual(["name"]);
+
+    // conversation.participants (the sync getter) reflects all of this immediately too — the
+    // displaced participant is still present (deactivated, never removed), not gone.
+    const stillThere = conversation.participants.find((p: any) => p.identity === "agent_132");
+    expect(stillThere).toBeTruthy();
+    const renamed = conversation.participants.find((p: any) => p.identity === "customer_1");
+    expect(renamed.name).toBe("Ada Lovelace");
 
     client.shutdown();
   });

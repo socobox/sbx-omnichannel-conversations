@@ -19,11 +19,13 @@ un chat. `sid` es la columna `conversation_sid` de zavu (con el id numérico com
 | `status` | `string` | Ej. `"in_progress"`, `"finish"`. Cambia vía `refreshFromRest` en cada reconexión. |
 | `lastMessage` | `{ index: number; dateCreated: Date } \| null` | El último mensaje conocido. `index` es un id de fila de base de datos — ver `message.md`. |
 | `lastReadMessageIndex` | `number \| null` | Persistido server-side desde la v0.3.0 — sobrevive un reload de página. Se deriva del `unread_count` que devuelve el backend en cada snapshot; ver la sección de no leídos más abajo. |
+| `participants` | `Participant[]` | **Nuevo.** El snapshot de participantes que este objeto ya tiene en mano — nunca dispara red. Ver la sección dedicada más abajo. |
 
 ## Eventos de instancia
 
-Ya están en la tabla completa de `README.md` (`updated`, `messageAdded`, `messageUpdated`) — acá
-el detalle de qué `ConversationUpdateReason` corresponde a cada disparador de `updated`:
+Ya están en la tabla completa de `README.md` (`updated`, `messageAdded`, `messageUpdated`,
+`participantJoined`, `participantLeft`, `participantUpdated`) — acá el detalle de qué
+`ConversationUpdateReason` corresponde a cada disparador de `updated`:
 
 | `updateReasons` incluye | Se dispara cuando… | Línea |
 |---|---|---|
@@ -35,6 +37,40 @@ el detalle de qué `ConversationUpdateReason` corresponde a cada disparador de `
 `ConversationUpdateReason` también declara `"dateCreated"`, `"dateUpdated"`, `"friendlyName"` y
 `"state"` (ver `types.md`) — ninguno de los cuatro se emite hoy en ninguna parte del código; están
 en el catálogo por paridad con Twilio, no porque este paquete los dispare.
+
+## Eventos de participantes (nuevo)
+
+Mirrors Twilio's own `participantJoined`/`participantLeft`/`participantUpdated` — antes de esto no
+existía ninguno de los tres: la única forma de enterarse de un cambio de participantes era volver a
+pedir `getParticipants()` por tu cuenta, sin que nada te avisara cuándo hacerlo (ver el reporte de
+diseño 2026-09-22, "los participantes de un chat no se mantienen sincronizados solos"). El backend
+ahora manda un frame `participant.updated` por WebSocket (`agentAssignment.service.ts
+#performAssignAgent`, en cada transferencia) que `Conversation#applyRealtimeParticipant` traduce a
+uno de los tres eventos:
+
+| Evento | Se dispara cuando… |
+|---|---|
+| `participantJoined` | Llega un participante que este objeto no conocía todavía CON un `sid` activo, o uno ya conocido cuyo `sid` pasa de `null` a un valor real (un agente reactivado tras un transfer de vuelta). |
+| `participantLeft` | Un participante YA conocido cuyo `sid` pasa de un valor real a `null` — el agente desplazado por un transfer. La fila nunca se borra (mirrors Rails/`agentAssignment.service.ts`'s own comment), así que esto es "se desactivó", no "se eliminó": sigue apareciendo en `participants`, solo que con `sid` nulo. |
+| `participantUpdated` | Cualquier otro cambio detectable en un participante YA conocido cuyo `sid` no se movió — hoy: `name` o `attributes` (metadata). Payload: `{ participant, updateReasons }`, mismo patrón que `messageUpdated`. |
+
+**Alcance actual del backend:** solo la transferencia de agente (`assign_agent`) dispara este
+frame hoy. Un participante nuevo agregado por otro motivo (una fila de bot, un segundo customer)
+no emite nada todavía — no es un descuido silencioso, es el alcance real de lo que
+`agentAssignment.service.ts` cubre por ahora.
+
+**Ejemplo.**
+```ts
+conversation.on("participantLeft", (participant) => {
+  console.log(`${participant.identity} ya no está en este chat`);
+});
+conversation.on("participantJoined", (participant) => {
+  console.log(`${participant.name ?? participant.identity} se unió al chat`);
+});
+conversation.on("participantUpdated", ({ participant, updateReasons }) => {
+  if (updateReasons.includes("name")) refreshDisplayName(participant);
+});
+```
 
 ## Métodos
 
@@ -61,8 +97,7 @@ console.log(page.hasPrevPage); // true si hay más historial hacia atrás
 
 **Qué esperar.** Un `Paginator<Message>` ordenado del más antiguo al más reciente dentro de la
 página. La primera llamada dispara un `GET /chats/:id` completo (`Conversation.ts:205-211`); las
-siguientes reutilizan la caché en memoria — a diferencia de `getParticipants()`, que **siempre**
-va a red (ver más abajo).
+siguientes reutilizan la caché en memoria — igual que `getParticipants()` desde el cambio de abajo.
 
 **Qué puede salir mal.** Si el `GET /chats/:id` falla (chat borrado, token sin acceso), rechaza
 con el mismo formato de error REST de siempre:
@@ -70,33 +105,67 @@ con el mismo formato de error REST de siempre:
 sbx-omnichannel-conversations: GET /chats/CH-a83f1 failed (404): <cuerpo>
 ```
 
-### `getParticipants()`
+### `participants` (propiedad, nuevo)
 
-**Qué hace.** Devuelve la lista de participantes del chat, refrescando también la identidad
-interna que usa `Message.author`.
+**Qué hace.** Devuelve el snapshot de participantes que este objeto YA tiene — nunca dispara una
+petición de red. Se construye a partir de los mismos datos que ya llegan en cada
+`GET /chats/:id` que este objeto hace por otros motivos (al construirse, al reconectar, al cargar
+mensajes por primera vez) y se mantiene al día en vivo vía `participant.updated`
+(`applyRealtimeParticipant`, ver la sección de eventos arriba).
+
+Reemplaza el problema real que motivó este cambio (reporte 2026-09-22): la lista completa de
+participantes ya llegaba varias veces por otros motivos y se descartaba casi entera — solo se
+guardaban `identity`/`name` en dos mapas internos; `participant_type` y el resto se perdían.
+
+**Firma.**
+```ts
+get participants(): Participant[];
+```
+
+**Ejemplo.**
+```ts
+const bot = conversation.participants.find((p) => p.type === "AI_AGENT");
+```
+
+**Qué esperar.** Un array vacío antes de la primera hidratación; después, un `Participant` por
+cada fila que este objeto haya visto — incluye uno desactivado por un transfer (`sid: null`), que
+sigue en la lista, no desaparece (ver `participantLeft` arriba).
+
+### `getParticipants(opts?)`
+
+**Qué hace.** Devuelve la lista de participantes del chat.
 
 **Cuándo la usas.** Al pintar quién está en el chat (cliente + agentes), o justo antes de mandar un
 mensaje si necesitas confirmar que ya existe un registro de participante para este agente.
 
 **Firma.**
 ```ts
-async getParticipants(): Promise<Participant[]>;
+async getParticipants(opts?: { forceFetch?: boolean }): Promise<Participant[]>;
 ```
 
 **Ejemplo.**
 ```ts
 const participants = await conversation.getParticipants();
 console.log(participants.map((p) => p.identity)); // ["customer_4471", "agent_182"]
+
+// Forzar una lectura fresca en vez de servir desde caché — ver "Qué esperar".
+const fresh = await conversation.getParticipants({ forceFetch: true });
 ```
 
-**Qué esperar.** Un array de `Participant` fresco. **Importante: esta llamada SIEMPRE va a red**
-(`Conversation.ts:223-227` hace un `GET /chats/:id` nuevo cada vez), a diferencia de
-`getMessages()`, que cachea después de la primera carga. Si la llamas en un loop de render sin
-memoizar, vas a generar una petición HTTP por render — no es un descuido, es que hoy no existe un
-endpoint más liviano solo-participantes en el backend.
+**Qué esperar.**
+> **Cambio.** Hasta ahora esta llamada SIEMPRE iba a red (documentado como decisión deliberada: "no
+> existe un endpoint más liviano solo-participantes en el backend"). El problema real nunca fue la
+> falta de ese endpoint — era que la lista completa YA llegaba por otros motivos y se tiraba. Ahora,
+> sin `forceFetch`, sirve directamente desde lo que este objeto ya ingirió (la misma fuente que la
+> propiedad `participants` de arriba) — solo golpea la red si todavía no hidrató nada
+> (`participants.length === 0`). `forceFetch: true` mantiene el comportamiento viejo (siempre red),
+> para el caso en que necesitás garantía de frescura (ej. justo después de una acción que sabés que
+> cambió participantes server-side pero de la que no necesariamente llegó el eco `participant.updated`
+> todavía).
 
 **Qué puede salir mal.** Mismo formato de error REST que cualquier otra llamada a `GET /chats/:id`
-si el chat no existe o el token no tiene acceso.
+si el chat no existe o el token no tiene acceso — solo aplica cuando esta llamada realmente golpea
+la red (ver arriba).
 
 ### `getUnreadMessagesCount()`
 
