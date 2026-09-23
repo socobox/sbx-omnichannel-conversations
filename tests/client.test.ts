@@ -379,6 +379,47 @@ describe("Client", () => {
     client.shutdown();
   });
 
+  it("a chat.updated frame turns into a conversationUpdated event (name + attributes), live — no reload needed", async () => {
+    // Report 2026-09-23: PUT /web_chats/:id (renaming a chat / editing its metadata) saved fine
+    // but broadcast nothing — no connected client (the editor's own screen included) ever learned
+    // about it short of a full reload.
+    const client = newClient("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    const clientUpdatedPromise = waitFor<any>(client, "conversationUpdated");
+    const conversationUpdatedPromise = waitFor<any>(conversation, "updated");
+
+    broadcast({
+      type: "chat.updated", chat_id: 1,
+      chat: { ...chats.get("1")!, name: "Renamed Live", metadata: { phone: "+19998887777" }, chat_messages: undefined, participants: undefined },
+    });
+
+    const { conversation: fromConversationEvent, updateReasons } = await conversationUpdatedPromise;
+    expect(fromConversationEvent).toBe(conversation); // same instance, not a rebuilt Conversation
+    expect(updateReasons.sort()).toEqual(["attributes", "friendlyName"]);
+    expect(conversation.friendlyName).toBe("Renamed Live");
+    expect(conversation.attributes).toEqual({ phone: "+19998887777" });
+
+    // Client-level aggregate fires too — the SAME per-conversation `updated` listener that
+    // already forwards a reconnect's refreshFromRest also forwards this, no separate wiring.
+    const fromClientEvent = await clientUpdatedPromise;
+    expect(fromClientEvent.conversation).toBe(conversation);
+
+    client.shutdown();
+  });
+
+  it("a chat.updated frame with nothing actually different emits nothing", async () => {
+    const client = newClient("agent-token");
+    const conversation = await waitFor<any>(client, "conversationJoined");
+    let fired = false;
+    conversation.on("updated", () => { fired = true; });
+
+    broadcast({ type: "chat.updated", chat_id: 1, chat: { ...chats.get("1")! } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fired).toBe(false);
+
+    client.shutdown();
+  });
+
   it("resolves a top-level `reactions` field into message.attributes.reactions", async () => {
     const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");

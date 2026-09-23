@@ -13,7 +13,7 @@ un chat. `sid` es la columna `conversation_sid` de zavu (con el id numérico com
 | Propiedad | Tipo | Notas |
 |---|---|---|
 | `sid` | `string` | `conversation_sid` del backend, o el id numérico como `string` si es `null` (`Conversation.ts:59`). |
-| `friendlyName` | `string \| null` | `chats.name`. |
+| `friendlyName` | `string \| null` | `chats.name`. Ya NO es de solo lectura desde 2026-09-23: se actualiza en una reconexión (`refreshFromRest`) y en vivo (`applyRestChatUpdate`, ver la sección de eventos abajo). |
 | `dateCreated` / `dateUpdated` | `Date` | Del `created_at`/`updated_at` del chat. |
 | `attributes` | `JSONValue` | `chats.metadata` tal cual — objeto arbitrario de campos custom. |
 | `status` | `string` | Ej. `"in_progress"`, `"finish"`. Cambia vía `refreshFromRest` en cada reconexión. |
@@ -30,13 +30,40 @@ Ya están en la tabla completa de `README.md` (`updated`, `messageAdded`, `messa
 | `updateReasons` incluye | Se dispara cuando… | Línea |
 |---|---|---|
 | `"lastMessage"` | Llega un mensaje nuevo (`message.new`) o, en una reconexión, el `lastMessage.index` cambió respecto al que tenías antes de refrescar. | `Conversation.ts:142`, `192` |
-| `"attributes"` | En una reconexión, `chats.metadata` cambió respecto a lo que tenías cacheado; o alguien llama `applyAttributesUpdate` directamente. | `Conversation.ts:173`, `202` |
-| `"status"` | En una reconexión, `chats.status` cambió (ej. de `"in_progress"` a `"finish"`). | `Conversation.ts:177` |
+| `"attributes"` | `chats.metadata` cambió — en una reconexión (`refreshFromRest`) o EN VIVO, vía un frame `chat.updated` (`applyRestChatUpdate` — nuevo, 2026-09-23; ver la sección dedicada abajo). |
+| `"friendlyName"` | `chats.name` cambió — mismos dos disparadores que `"attributes"` (reconexión o en vivo). **Nuevo desde 2026-09-23**: antes NADA actualizaba `friendlyName` después de construir el `Conversation`, ni siquiera una reconexión — renombrar un chat necesitaba una recarga completa de la app. |
+| `"status"` | `chats.status` cambió (ej. de `"in_progress"` a `"finish"`) — mismos dos disparadores. |
 | `"lastReadMessageIndex"` | Llamaste `setAllMessagesRead()` o `setAllMessagesUnread()` y el backend aceptó el guardado. **Nunca** se emite desde `refreshFromRest()` (reconexión) aunque el valor derivado haya cambiado — a propósito, ver la nota de esa función. | `Conversation.ts:358`, `380` |
 
-`ConversationUpdateReason` también declara `"dateCreated"`, `"dateUpdated"`, `"friendlyName"` y
-`"state"` (ver `types.md`) — ninguno de los cuatro se emite hoy en ninguna parte del código; están
-en el catálogo por paridad con Twilio, no porque este paquete los dispare.
+`ConversationUpdateReason` también declara `"dateCreated"`, `"dateUpdated"` y `"state"` (ver
+`types.md`) — ninguno de los tres se emite hoy en ninguna parte del código; están en el catálogo
+por paridad con Twilio, no porque este paquete los dispare.
+
+## Eventos de chat en vivo — `chat.updated` (nuevo, 2026-09-23)
+
+Reporte: editar el nombre/metadata de un chat vía `PUT /web_chats/:id` guardaba bien pero no
+avisaba a NADIE en tiempo real — ni siquiera a la propia pantalla que hizo la edición; solo
+aparecía tras recargar. El backend ahora manda un frame `chat.updated` (chat-wide, vía el mismo
+`broadcast()` que ya usan `message.new`/`participant.updated`) cada vez que `PUT /web_chats/:id`
+cambia algo real — `Conversation#applyRestChatUpdate` lo traduce en un `updated` normal
+(`friendlyName`/`attributes`/`status`, los mismos tres de la tabla de arriba), que a su vez ya
+llega también como `conversationUpdated` en el `Client` (el mismo listener por-conversación que ya
+reenvía el `updated` de una reconexión).
+
+Un edit al PARTICIPANTE (nombre/teléfono/correo, vía `PUT /web_chats/:id/participants/:id`) no usa
+este frame — reusa el `participant.updated` que ya existía para transferencias (ver
+`participant.md`), así que se traduce en `participantUpdated`, no en `conversationUpdated`.
+
+**Ejemplo.**
+```ts
+conversation.on("updated", ({ updateReasons }) => {
+  if (updateReasons.includes("friendlyName")) refreshChatListItem(conversation);
+});
+client.on("conversationUpdated", ({ conversation, updateReasons }) => {
+  // el mismo evento, agregado a nivel Client — útil para una lista de chats que no tiene
+  // un listener propio en cada Conversation individual.
+});
+```
 
 ## Eventos de participantes (nuevo)
 

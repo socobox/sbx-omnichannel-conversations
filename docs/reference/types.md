@@ -90,11 +90,12 @@ const ConversationUpdateReason = {
 } as const;
 ```
 
-`"dateCreated"`, `"dateUpdated"`, `"friendlyName"` y `"state"` están declarados por paridad con el
-catálogo de Twilio, pero **el código de este paquete nunca los emite hoy** — solo
-`"attributes"`, `"status"`, `"lastMessage"` y `"lastReadMessageIndex"` aparecen realmente en un
-`emit(...)`. Si tu código espera reaccionar a uno de los cuatro no emitidos, no vas a ver ese
-evento disparado por nada de lo que hace este paquete actualmente.
+`"dateCreated"`, `"dateUpdated"` y `"state"` están declarados por paridad con el catálogo de
+Twilio, pero **el código de este paquete nunca los emite hoy**. `"friendlyName"` SÍ se emite desde
+2026-09-23 (antes estaba en la misma situación que estos tres) — ver `conversation.md` para
+quién lo dispara (`refreshFromRest` en una reconexión, `applyRestChatUpdate` en vivo vía el frame
+`chat.updated`). Si tu código espera reaccionar a `"dateCreated"`/`"dateUpdated"`/`"state"`, no vas
+a ver ese evento disparado por nada de lo que hace este paquete actualmente.
 
 ## `MessageUpdateReason`
 

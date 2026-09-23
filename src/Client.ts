@@ -174,6 +174,14 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     transport.on(TransportEvent.ParticipantUpdated, ({ chatId, participant }) => {
       this.conversationsByChatId.get(chatId)?.applyRealtimeParticipant(participant);
     });
+    // Unlike ParticipantUpdated, this DOES reach a Client-level aggregate — but not by wiring one
+    // here: joinConversation/getConversationBySid already forward every Conversation's own
+    // `updated` event to ClientEvent.ConversationUpdated, so calling applyRestChatUpdate below is
+    // enough; that existing per-conversation listener does the rest, same as it already does for
+    // a reconnect's refreshFromRest.
+    transport.on(TransportEvent.ChatUpdated, ({ chatId, chat }) => {
+      this.conversationsByChatId.get(chatId)?.applyRestChatUpdate(chat);
+    });
     transport.on(TransportEvent.MessageNew, (raw) => this.applyMessage(raw, "added"));
     transport.on(TransportEvent.MessageUpdated, (raw) => this.applyMessage(raw, "updated"));
     // No public "connectionError" surface in the real Client either — a serverError becomes a

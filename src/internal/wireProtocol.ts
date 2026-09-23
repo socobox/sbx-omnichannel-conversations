@@ -11,6 +11,7 @@ export const ServerFrameType = {
   ChatAssigned: "chat.assigned",
   ChatUnassigned: "chat.unassigned",
   ParticipantUpdated: "participant.updated",
+  ChatUpdated: "chat.updated",
   Error: "error",
 } as const;
 export type ServerFrameType = (typeof ServerFrameType)[keyof typeof ServerFrameType];
@@ -32,6 +33,7 @@ export const TransportEvent = {
   ChatAssigned: "chat.assigned",
   ChatUnassigned: "chat.unassigned",
   ParticipantUpdated: "participant.updated",
+  ChatUpdated: "chat.updated",
   ServerError: "serverError",
 } as const;
 export type TransportEvent = (typeof TransportEvent)[keyof typeof TransportEvent];

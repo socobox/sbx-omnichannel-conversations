@@ -52,7 +52,10 @@ interface ConversationEvents {
 // `due_time`, `phone`, `name`, etc. already travel).
 export class Conversation extends TypedEventEmitter<ConversationEvents> {
   readonly sid: string;
-  readonly friendlyName: string | null;
+  // NOT readonly (since 2026-09-23): a chat rename has to be reflected somewhere, and both
+  // refreshFromRest (reconnect) and applyRestChatUpdate (a live `chat.updated` frame) need to
+  // update it in place — see ConversationUpdateReason.FriendlyName below.
+  friendlyName: string | null;
   readonly dateCreated: Date;
   readonly dateUpdated: Date;
   attributes: JSONValue;
@@ -362,9 +365,21 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
    * Used on reconnect. While the socket was down no message.new was delivered, so messages,
    * participants, status and metadata may all have moved on without a single event arriving.
    */
-  refreshFromRest(raw: RestChat): void {
+  /**
+   * Diffs name/attributes/status against `raw` and applies whatever changed, returning the
+   * matching `ConversationUpdateReason`s — the shared core of both refreshFromRest (reconnect,
+   * also handles messages/participants below) and applyRestChatUpdate (a live `chat.updated`
+   * frame, name/attributes/status only). `friendlyName` diffing is new (2026-09-23): before this,
+   * NOTHING ever updated it after construction (it was `readonly`) — not even a reconnect's own
+   * refreshFromRest, so renaming a chat needed a full app reload to show up ANYWHERE, not just
+   * "no live event" (see applyRestChatUpdate's own comment for the live-event half of this gap).
+   */
+  private applyNameAttributesStatus(raw: Pick<RestChat, "name" | "metadata" | "status">): ConversationUpdateReason[] {
     const updateReasons: ConversationUpdateReason[] = [];
-
+    if (this.friendlyName !== raw.name) {
+      this.friendlyName = raw.name;
+      updateReasons.push(ConversationUpdateReason.FriendlyName);
+    }
     const nextAttributes = (raw.metadata ?? {}) as JSONValue;
     if (JSON.stringify(this.attributes) !== JSON.stringify(nextAttributes)) {
       this.attributes = nextAttributes;
@@ -374,6 +389,26 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
       this.status = raw.status;
       updateReasons.push(ConversationUpdateReason.Status);
     }
+    return updateReasons;
+  }
+
+  /**
+   * @internal — called by Client on a `chat.updated` WS frame (see wsTransport.ts). Design
+   * report (2026-09-23, "al editar los datos de un chat no llega ningún aviso en tiempo real"):
+   * `PUT /web_chats/:id` persisted a name/metadata edit fine but broadcast NOTHING — no connected
+   * client (the editor's own screen included) ever learned about it short of a full reload. Only
+   * diffs name/attributes/status; a participant's own name/phone/email edit arrives via its own
+   * `participant.updated` frame instead (applyRealtimeParticipant) — this never touches messages
+   * or participants, unlike refreshFromRest, since a plain metadata edit has nothing new to say
+   * about those.
+   */
+  applyRestChatUpdate(raw: RestChat): void {
+    const updateReasons = this.applyNameAttributesStatus(raw);
+    if (updateReasons.length) this.emit(ConversationEvent.Updated, { conversation: this, updateReasons });
+  }
+
+  refreshFromRest(raw: RestChat): void {
+    const updateReasons = this.applyNameAttributesStatus(raw);
 
     this.ingestParticipants(raw.participants ?? []);
 
@@ -410,12 +445,6 @@ export class Conversation extends TypedEventEmitter<ConversationEvents> {
     // reconexión borraría el badge de los mensajes llegados durante el corte — exactamente el
     // bug que 255723f vino a arreglar.
     if (updateReasons.length) this.emit(ConversationEvent.Updated, { conversation: this, updateReasons });
-  }
-
-  /** @internal */
-  applyAttributesUpdate(attributes: JSONValue): void {
-    this.attributes = attributes;
-    this.emit(ConversationEvent.Updated, { conversation: this, updateReasons: [ConversationUpdateReason.Attributes] });
   }
 
   private async ensureMessagesLoaded(): Promise<Message[]> {
