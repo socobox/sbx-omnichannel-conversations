@@ -122,7 +122,7 @@ beforeEach(() => {
           chat_id: Number(sendMediaMatch[1]), participant_id: participantId, filename: files[0]!.name,
           filenames: files.map((f) => f.name), attributes: attributesRaw ? JSON.parse(String(attributesRaw)) : undefined,
         });
-        const attachments = files.map((f, i) => ({ key: `sbx-key-90${i}`, name: f.name, content_type: f.type }));
+        const attachments = files.map((f, i) => ({ key: `sbx-key-90${i}`, filename: f.name, content_type: f.type }));
         const created: RestChatMessage = {
           id: 900, sid: "IM900", body: (form.get("body") as string) || "", media: attachments[0]!.key, media_type: files[0]!.type,
           metadata: attributesRaw ? JSON.parse(String(attributesRaw)) : {}, reactions: [], response_time: null,
@@ -440,15 +440,21 @@ describe("Client", () => {
     client.shutdown();
   });
 
-  it("message.attributes surfaces a previously-edited message's update_history from the backend's double-nested custom_metadata wrap", async () => {
+  it("message.attributes keeps the backend's custom_metadata wrapper untouched, however deeply nested (fixed 2026-09-24)", async () => {
     // Reproduces the real shape reported from production (sbx-omnichannel-ui, 2026-09-21):
     // a message already edited once carries its ORIGINAL, faithful metadata one level deeper
     // than the top level, because toChatMessagePublic (chat.repo.ts, a straight port of Rails'
     // `object.metadata.merge(custom_metadata: object.metadata)`) wraps whatever was stored
     // (itself already `{ reactions: [], custom_metadata: { update_history: [...] } }` from the
-    // FIRST edit) inside a second `custom_metadata` key. Discarding `metadata.custom_metadata`
-    // outright (the pre-fix behavior) loses the history entirely; the fix must read the nested
-    // copy's OWN content as the real attributes, not the shadowed top level.
+    // FIRST edit) inside a second `custom_metadata` key.
+    //
+    // A prior fix (2026-09-21) handled this by UNWRAPPING one level and re-attaching only
+    // custom_metadata's own content as `attributes` — which fixed update_history vanishing, but
+    // (found 2026-09-24, sbx-omnichannel-ui report) silently dropped the `custom_metadata`
+    // wrapper KEY itself, which real Twilio Attributes/Rails metadata always carries and which
+    // ~37 places in that UI read through directly (`attributes.custom_metadata.transcription`
+    // etc.). The correct fix passes `metadata` straight through with no unwrapping at all — the
+    // wrapper is already there, exactly as the backend/Rails always produced it.
     const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
 
@@ -476,16 +482,19 @@ describe("Client", () => {
     expect(message.attributes).toEqual({
       reactions: [],
       custom_metadata: {
-        update_history: [
-          { new_body: "Como vas compadre?", prev_body: "Como vas?", update_at: "2026-09-21T16:51:00.256Z", update_user: "admin@demo.com" },
-        ],
+        reactions: [],
+        custom_metadata: {
+          update_history: [
+            { new_body: "Como vas compadre?", prev_body: "Como vas?", update_at: "2026-09-21T16:51:00.256Z", update_user: "admin@demo.com" },
+          ],
+        },
       },
     });
 
     client.shutdown();
   });
 
-  it("message.attributes stays {} (plus reactions) for a message that was never edited", async () => {
+  it("message.attributes stays {custom_metadata: {}} (plus reactions) for a message that was never edited", async () => {
     const client = newClient("agent-token");
     await waitFor(client, "conversationJoined");
 
@@ -499,7 +508,7 @@ describe("Client", () => {
     broadcast({ type: "message.updated", chat_message: neverEdited });
     const { message } = await updatedPromise;
 
-    expect(message.attributes).toEqual({ reactions: [] });
+    expect(message.attributes).toEqual({ custom_metadata: {}, reactions: [] });
 
     client.shutdown();
   });
@@ -914,8 +923,8 @@ describe("Client", () => {
         id: 901, sid: "IM901", body: "", media: "sbx-key-a", media_type: "image/png",
         metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
         attachments: [
-          { key: "sbx-key-a", name: "one.png", content_type: "image/png" },
-          { key: "sbx-key-b", name: "two.jpg", content_type: "image/jpeg" },
+          { key: "sbx-key-a", filename: "one.png", content_type: "image/png" },
+          { key: "sbx-key-b", filename: "two.jpg", content_type: "image/jpeg" },
         ],
         created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
       },
@@ -933,6 +942,27 @@ describe("Client", () => {
 
     const url0 = await message.attachedMedia![0]!.getContentTemporaryUrl();
     expect(url0).toBe("https://cdn.example.com/901"); // mock server's media_url handler ignores ?key, real backend doesn't
+
+    client.shutdown();
+  });
+
+  it("attachedMedia falls back to the legacy `name` key for a message stored before the 2026-09-24 filename rename", async () => {
+    chats.set("1", { ...chats.get("1")!, chat_messages: [
+      ...chats.get("1")!.chat_messages!,
+      {
+        id: 902, sid: "IM902", body: "", media: "sbx-key-legacy", media_type: "application/pdf",
+        metadata: {}, reactions: [], response_time: null, chat_id: 1, participant_id: 10,
+        attachments: [{ key: "sbx-key-legacy", name: "old-shape.pdf", content_type: "application/pdf" } as any],
+        created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      },
+    ] });
+    const client = newClient(fakeJwt({ scope: "agent", agent_id: 99 }));
+    await waitFor(client, "conversationJoined");
+    const conversation = (await client.getSubscribedConversations()).items[0]!;
+    const page = await conversation.getMessages();
+    const message = page.items.find((m) => m.index === 902)!;
+
+    expect(message.attachedMedia![0]!.filename).toBe("old-shape.pdf");
 
     client.shutdown();
   });

@@ -14,11 +14,17 @@ export interface RestReaction {
 }
 
 // Matches zavu's own `AttachmentPublicRow` (src/db/schema.ts) — a top-level sibling of `metadata`,
-// same pattern as `reactions` below. No Rails equivalent (ChatMessage there has no multi-file
-// concept, only singular `media`/`media_type`) — a genuinely new capability (2026-09-22).
+// same pattern as `reactions` below. DOES have a Rails equivalent after all (corrected 2026-09-24
+// — see AttachmentPublicRow's own comment): a Twilio-Conversations-bridged chat's own webhook
+// handler has always built this same shape, under a `filename` key. `name` is kept here, optional,
+// only because a message persisted between 2026-09-22 (when zavu's own attachments feature shipped
+// under that key) and this fix still has it stored that way forever — Media.ts falls back to it.
 export interface RestAttachment {
   key: string;
-  name: string | null;
+  filename?: string | null;
+  /** @deprecated Superseded by `filename` (2026-09-24) — only ever present on a message stored
+   * before that fix. New data always uses `filename`. */
+  name?: string | null;
   content_type: string | null;
 }
 

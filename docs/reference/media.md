@@ -18,7 +18,7 @@ Antes de 2026-09-22, `Media.filename` era **siempre `null`** en un adjunto entra
 mandaba ningún campo de nombre de archivo, solo `media` (la clave/URL interna) y `media_type`.
 
 Desde que zavu soporta varios adjuntos por mensaje (`metadata.attachments`, un array de
-`{key, name, content_type}` — ver `schema.ts`'s `AttachmentPublicRow` del lado del backend),
+`{key, filename, content_type}` — ver `schema.ts`'s `AttachmentPublicRow` del lado del backend),
 `RestChatMessage.attachments` SÍ trae el nombre real de cada archivo, y `Message.ts` lo usa
 directamente al construir cada `Media`:
 
@@ -28,18 +28,25 @@ this.attachedMedia = raw.attachments?.length
   ? raw.attachments.map((a) => new Media({
       chatId: raw.chat_id, messageId: raw.id,
       contentType: a.content_type ?? "application/octet-stream",
-      filename: a.name, key: a.key,
+      filename: a.filename ?? a.name ?? null, // `name` = clave legacy, solo mensajes de antes del 2026-09-24
+      key: a.key,
       getToken: () => conversation.currentToken,
     }))
   : /* fallback a la fila legacy — ver abajo */;
 ```
 
-**Sigue siendo `null`** solo en el camino legacy: un mensaje de ANTES de esta fecha (o que solo
-tiene la columna singular `media`/`media_type`, sin `metadata.attachments`) no tiene ningún nombre
-que leer del backend — ese `Media` se construye sin `filename`, igual que siempre.
+**Desde 2026-09-24** esto también aplica a adjuntos ENTRANTES (whatsapp/instagram/sms) — antes solo
+un adjunto que el propio agente mandaba (`sendMessage`/`MessageBuilder`) construía `attachments`;
+uno que llegaba de un cliente real solo tenía `media`/`media_type`, sin nombre. El email entrante
+es el único canal que todavía no arma `attachments` (el webhook de SBX Mail no trae datos de
+adjunto utilizables) — ver `messagePipeline.service.ts`'s propio comentario.
 
-**Práctico:** para un mensaje nuevo con adjunto(s), `message.attachedMedia![i].filename` ya trae el
-nombre real. Solo hace falta un fallback genérico para mensajes viejos.
+**Sigue siendo `null`** solo en el camino legacy real: un mensaje de ANTES de esta fecha, o del
+canal de email entrante, sin `metadata.attachments` — ese `Media` se construye sin `filename`,
+igual que siempre.
+
+**Práctico:** para casi cualquier mensaje con adjunto hoy, `message.attachedMedia![i].filename` ya
+trae el nombre real. Solo hace falta un fallback genérico para mensajes viejos o email entrante.
 
 ## Propiedades
 

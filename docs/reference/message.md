@@ -47,7 +47,7 @@ insertaron en el medio, no mensajes borrados de este chat. Dos consecuencias pr�
 | `attributes` | `JSONValue` | El contenido REAL de `metadata` del mensaje + `reactions` como campo hermano — ver nota abajo sobre `custom_metadata`. |
 | `dateCreated` / `dateUpdated` | `Date` | — |
 | `conversation` | `Conversation` | La conversación dueña de este mensaje. |
-| `attachedMedia` | `Media[] \| null` | `null` si no hay adjunto; si lo hay, un array de **un solo** `Media` — zavu no soporta múltiples adjuntos por mensaje hoy. |
+| `attachedMedia` | `Media[] \| null` | `null` si no hay adjunto. **Desde 2026-09-22**, un mensaje puede llevar varios archivos — un `Media` por cada entrada de `metadata.attachments` (con su propio `key`/`filename`/`content_type`). Si el mensaje no tiene `attachments` (legado, o un solo adjunto viejo), cae de vuelta al par singular `media`/`media_type`. |
 | `type` | `MessageType` | `"text"` o `"media"`, derivado de si hay `attachedMedia`. |
 | `media` | `Media \| null` | **Deprecated** — alias de `attachedMedia?.[0]`, mantenido por paridad con el getter deprecado de Twilio. |
 
@@ -68,14 +68,22 @@ Nota sobre `attributes.reactions`: el backend manda `reactions` como un campo HE
 El constructor de `Message` lo eleva al nivel superior de `attributes` para que
 `message.attributes.reactions` funcione tal como un componente ya lo espera.
 
-Nota sobre `metadata.custom_metadata`: el serializador de zavu (`toChatMessagePublic`, puerto fiel
-de `ChatMessageSerializer` de Rails) envuelve el `metadata` realmente guardado un nivel más
-adentro, bajo su propia clave `custom_metadata` — es decir, `metadata` en la fila cruda es
-`{ ...stored, custom_metadata: stored }`. `attributes` se construye a partir del CONTENIDO de esa
-clave anidada (no del nivel superior), porque es la única copia que sigue siendo fiel a lo último
-que se escribió — ver el comentario en `Message.ts` (constructor) para el porqué exacto. Para un
-mensaje que nunca fue editado, `stored` es `{}`, así que `attributes` queda en `{}` (más
-`reactions`).
+Nota sobre `metadata.custom_metadata` (**corregido 2026-09-24**): el serializador de zavu
+(`toChatMessagePublic`, puerto fiel de `ChatMessageSerializer` de Rails) envuelve el `metadata`
+realmente guardado un nivel más adentro, bajo su propia clave `custom_metadata` — es decir,
+`metadata` en la fila cruda es `{ ...stored, custom_metadata: stored }`. Esto es exactamente lo
+mismo que Rails siempre mandó en el campo `Attributes` de un mensaje de Twilio Conversations
+(`twilio_service.rb`), y `sbx-omnichannel-ui` lee `attributes.custom_metadata.<campo>` en ~37
+lugares (transcription, template, bot, sbx_file_key, parent_message_sid, update_history,
+attachments) esperando encontrar esa envoltura ahí.
+
+`attributes` es el `metadata` crudo TAL CUAL llegó por el wire (sin desenvolver `custom_metadata`,
+sin reconstruirlo desde otro lado) más `reactions` como campo hermano — así que
+`attributes.custom_metadata` siempre está presente, con lo que sea que el backend haya guardado.
+Una versión anterior de este código desenvolvía `custom_metadata` y solo reattachaba su CONTENIDO
+como `attributes`, lo que perdía la clave `custom_metadata` en sí misma (reportado desde
+sbx-omnichannel-ui, 2026-09-24). Para un mensaje que nunca fue editado, `stored` es `{}`, así que
+`attributes` queda en `{ custom_metadata: {}, reactions: [] }`.
 
 ## Métodos
 

@@ -45,33 +45,28 @@ export class Message {
     // `chat_messages.metadata` one level deeper, under the metadata's own `custom_metadata` key —
     // a straight port of Rails' `ChatMessageSerializer#metadata`
     // (`object.metadata.merge(custom_metadata: object.metadata)`), confirmed identical against
-    // sbx-omnichannel-api. That nested copy, NOT the top level, is the one that reflects what a
-    // client last wrote: `PUT .../messages/:id` merges `metadata` SHALLOWLY into the stored value
-    // (`ChatMessage#metadata=`: `metadata.merge(val)`, ported verbatim in
-    // web_chat.repo.ts#updateMessage) — so a caller that sends its own `custom_metadata` key (as
-    // this package's apps do, e.g. edit-history tracking via updateAttributes) overwrites the
-    // TOP-LEVEL `custom_metadata` outright, and only the nested copy underneath still carries the
-    // fully-merged, faithful value. Previously this dropped `metadata.custom_metadata` entirely,
-    // silently losing anything stored there (reported from sbx-omnichannel-ui: edited messages'
-    // `update_history` vanished from `message.attributes`). `attributes` is therefore built from
-    // `custom_metadata`'s OWN content when it's a plain object, falling back to the rest of
-    // `metadata` only for a row that predates this wrapping (defensive — every message
-    // `toChatMessagePublic` serializes already carries the key, even if empty: `{}` for a message
-    // that was never edited). `reactions` stays a raw sibling field, never something a caller
-    // writes via updateAttributes, so it's always taken straight from `raw.reactions`.
+    // sbx-omnichannel-api, INCLUDING that `custom_metadata` key itself staying nested inside
+    // `attributes` on the wire (confirmed 2026-09-24 against Rails' own real payload — see
+    // twilio_service.rb#L707/852 and the serializer — every `Attributes`/`metadata` blob Rails has
+    // ever produced carries the same self-nested shape). sbx-omnichannel-ui reads through
+    // `attributes.custom_metadata.<field>` in ~37 places (transcription, template, bot,
+    // sbx_file_key, parent_message_sid, update_history, attachments) for exactly that reason.
+    // `attributes` therefore passes the raw wire metadata straight through — no unwrapping, no
+    // rebuilding a `custom_metadata` key from a different source — the wrapper is already there,
+    // untouched, whatever a caller last wrote via `updateAttributes` (which shallow-merges into
+    // the SAME stored object server-side, so its own `custom_metadata` key round-trips exactly
+    // as sent). A prior version of this code unwrapped `custom_metadata` and re-attached only its
+    // CONTENTS, which silently dropped the wrapper key itself — reported from sbx-omnichannel-ui
+    // 2026-09-24 (`attributes.custom_metadata.transcription` etc. all reading undefined).
     const rawMetadata = (raw.metadata ?? {}) as Record<string, unknown>;
-    const { custom_metadata, ...rest } = rawMetadata;
-    const base =
-      custom_metadata && typeof custom_metadata === "object" && !Array.isArray(custom_metadata)
-        ? (custom_metadata as Record<string, unknown>)
-        : rest;
     // `attachments` (like `reactions`) is a raw sibling field on `raw`, not something a caller
-    // writes via updateAttributes — stripped here so it never leaks into `attributes` as a stale
-    // duplicate merely because `toChatMessagePublic` wraps the WHOLE stored metadata into
-    // `custom_metadata` (same reasoning `reactions` already gets, just enforced by omission here
-    // instead of by overriding after the spread below).
-    const { attachments: _attachmentsInBase, ...cleanBase } = base;
-    this.attributes = { ...cleanBase, reactions: raw.reactions ?? [] } as unknown as JSONValue;
+    // writes via updateAttributes — stripped here so the TOP-LEVEL `attributes.attachments` never
+    // leaks in as a stale duplicate merely because `toChatMessagePublic` wraps the WHOLE stored
+    // metadata (attachments included) into `custom_metadata`. The NESTED
+    // `attributes.custom_metadata.attachments` copy is left completely alone — that's real stored
+    // data, not something this class computed, and sbx-omnichannel-ui reads it directly.
+    const { attachments: _attachmentsAtTopLevel, ...cleanMetadata } = rawMetadata;
+    this.attributes = { ...cleanMetadata, reactions: raw.reactions ?? [] } as unknown as JSONValue;
     this.dateCreated = new Date(raw.created_at);
     this.dateUpdated = new Date(raw.updated_at);
     this.conversation = conversation;
@@ -85,7 +80,9 @@ export class Message {
           chatId: raw.chat_id,
           messageId: raw.id,
           contentType: a.content_type ?? "application/octet-stream",
-          filename: a.name,
+          // `filename` is the current (2026-09-24) key; `name` only ever shows up on a message
+          // stored before that fix (see RestAttachment's own comment) — never both at once.
+          filename: a.filename ?? a.name ?? null,
           key: a.key,
           getToken: () => conversation.currentToken,
         }))
