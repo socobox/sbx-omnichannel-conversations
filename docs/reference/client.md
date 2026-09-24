@@ -34,6 +34,20 @@ hidratación por debajo. La diferencia es **cuándo devuelven el control al que 
   agotó el timeout de 10 segundos (`HYDRATION_TIMEOUT_MS`, `Client.ts:50`). Cuando `create()`
   resuelve, `getSubscribedConversations()` YA tiene la lista completa — sin carreras.
 
+**Concurrencia de la hidratación (desde 2026-09-24).** Cada chat en `subscribed_chat_ids` dispara
+su propio `GET /chats/:id` completo (`chat_messages[]`/`participants[]` incluidos). Hasta esta
+fecha esto salía TODO a la vez, sin ningún límite — un agente con 100 chats abiertos disparaba 100
+requests simultáneos en cada conexión, reconexión, y renovación de token. Reportado desde
+sbx-omnichannel-ui (item G, 2026-09-24): riesgo real de saturar el backend, sobre todo si varios
+agentes reconectan a la vez tras una caída compartida (la misma clase de "thundering herd" que
+`wsTransport.ts`'s propio jitter de reconexión ya mitiga, pero solo para CUÁNDO reconectan, no
+para cuánta carga genera cada uno al hacerlo). `syncConversations` ahora corre esos `GET`s con un
+tope fijo de 5 a la vez (`HYDRATION_CONCURRENCY`, `Client.ts`) — sigue cargando cada chat, solo que
+nunca más de 5 al mismo tiempo. Es una mitigación puramente del lado del cliente: no reduce
+CUÁNTOS requests hace, solo cuántos van en paralelo. La solución de fondo (un endpoint de resumen
+por agente que evite el `GET` completo por chat en el listado) depende del backend y sigue en
+discusión.
+
 En la práctica: si tu código construye el `Client` y de inmediato necesita la lista de
 conversaciones (una pantalla de bandeja de entrada, por ejemplo), usa `Client.create()`. Si tu
 código construye el `Client` y reacciona a eventos según van llegando (el patrón histórico de

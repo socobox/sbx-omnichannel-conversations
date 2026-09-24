@@ -49,6 +49,43 @@ const TOKEN_ABOUT_TO_EXPIRE_MS = 3 * 60 * 1000;
  * from ever being announced, leaving an agent on a loading screen with no error and no timeout. */
 const HYDRATION_TIMEOUT_MS = 10_000;
 
+/** How many `GET /chats/:id` hydration requests run at once (found 2026-09-24, sbx-omnichannel-ui
+ * report item G): syncConversations used to fire every subscribed chat's request simultaneously,
+ * with no cap at all — an agent with 100 open chats meant 100 concurrent full-chat GETs (each
+ * including its own chat_messages[]/participants[]) on every connect, reconnect, AND (per
+ * wsTransport.ts's own "thundering herd" comment on RECONNECT_JITTER) potentially many agents at
+ * once after a shared outage. The jitter there only spreads out WHEN clients reconnect, not how
+ * much load each one then generates. This is a client-side mitigation only — it does not reduce
+ * the number of requests, just how many are in flight at once — see this package's README for the
+ * bigger, backend-dependent fix (a lightweight per-agent chat summary endpoint) still under
+ * discussion. */
+const HYDRATION_CONCURRENCY = 5;
+
+/** Runs `fn` over `items` with at most `limit` calls in flight at once, preserving
+ * Promise.allSettled's per-item result shape and order. A plain fixed-size worker pool: each of
+ * `limit` workers pulls the next index off a shared cursor until none remain. */
+/** @internal Exported only so tests/concurrency.test.ts can verify the cap deterministically,
+ * without going through a real Client/WebSocket/HTTP round trip (see that file's own comment on
+ * why a network-timing-based test of this turned out to interfere with an unrelated readiness
+ * test when the whole suite ran together). Not part of the package's public API. */
+export async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<PromiseSettledResult<R>[]> {
+  const results = new Array<PromiseSettledResult<R>>(items.length);
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i] as T) };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
 /** Options for `new Client(token, options)` / `Client.create(token, options)`. */
 export interface ClientOptions {
   /**
@@ -280,7 +317,7 @@ export class Client extends TypedEventEmitter<ClientEvents> {
     for (const chatId of [...this.conversationsByChatId.keys()]) {
       if (!subscribed.has(chatId)) this.leaveConversation(chatId);
     }
-    const results = await Promise.allSettled(chatIds.map((id) => this.joinConversation(id)));
+    const results = await mapWithConcurrency(chatIds, HYDRATION_CONCURRENCY, (id) => this.joinConversation(id));
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
     const firstError = rejected[0] ? String(rejected[0].reason?.message ?? rejected[0].reason) : "";
     return { total: chatIds.length, failed: rejected.length, firstError };

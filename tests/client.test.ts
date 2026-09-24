@@ -38,6 +38,9 @@ let participantUpdates: Array<{ participantId: number; body: unknown }> = [];
 // Counts real GET /chats/:id calls — used to assert Conversation#participants/getParticipants()
 // actually avoid a network round trip when serving from what's already been ingested.
 let chatGetCount = 0;
+// Which chat ids the mock "connected" frame reports as subscribed — overridable per test (see the
+// hydration test below), [1] by default to match every other test in this file.
+let subscribedChatIds = [1];
 
 function baseChat(overrides: Partial<RestChat> = {}): RestChat {
   return {
@@ -72,6 +75,7 @@ beforeEach(() => {
   participantLastRead = new Map();
   participantUpdates = [];
   chatGetCount = 0;
+  subscribedChatIds = [1];
 
   server = Bun.serve({
     port: 0,
@@ -137,7 +141,7 @@ beforeEach(() => {
     websocket: {
       open(ws) {
         sockets.push(ws as unknown as { send: (data: string) => void; close: () => void });
-        ws.send(JSON.stringify({ type: "connected", subscribed_chat_ids: [1] }));
+        ws.send(JSON.stringify({ type: "connected", subscribed_chat_ids: subscribedChatIds }));
       },
       message(_ws, raw) {
         const msg = JSON.parse(String(raw));
@@ -963,6 +967,30 @@ describe("Client", () => {
     const message = page.items.find((m) => m.index === 902)!;
 
     expect(message.attachedMedia![0]!.filename).toBe("old-shape.pdf");
+
+    client.shutdown();
+  });
+
+  // The concurrency CAP itself (never more than 5 GETs in flight at once) is verified
+  // deterministically, without any real network timing, in tests/concurrency.test.ts (a network-
+  // timing version of that assertion here worked in isolation but made an unrelated readiness.
+  // test.ts test flaky when the whole suite ran together). This is the end-to-end half: bounded
+  // concurrency must still hydrate EVERY subscribed chat, not just the first `limit` of them.
+  it("hydration still loads every subscribed chat, more than the concurrency cap included (2026-09-24, sbx-omnichannel-ui report item G)", async () => {
+    const totalChats = 12; // > HYDRATION_CONCURRENCY (5)
+    const ids = Array.from({ length: totalChats }, (_, i) => i + 1);
+    subscribedChatIds = ids;
+    for (const id of ids) {
+      chats.set(String(id), baseChat({ id, conversation_sid: `CH${id}`, participants: [], chat_messages: [] }));
+    }
+
+    const client = await Client.create(fakeJwt({ scope: "agent", agent_id: 99 }));
+    clients.push(client);
+    const items = (await client.getSubscribedConversations()).items;
+
+    expect(items).toHaveLength(totalChats);
+    expect(chatGetCount).toBe(totalChats);
+    expect(new Set(items.map((c) => c.sid))).toEqual(new Set(ids.map((id) => `CH${id}`)));
 
     client.shutdown();
   });
